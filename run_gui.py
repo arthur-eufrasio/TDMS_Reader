@@ -127,7 +127,14 @@ class TDMSGuiApp:
 
         # Processing
         proc_group = ttk.LabelFrame(self.controls_frame, text="3) Processing", padding=8)
-        proc_group.pack(fill=tk.X, pady=4)
+        proc_group.pack(fill=tk.BOTH, expand=True, pady=4)
+
+        # Allow row 1 (the listbox) to expand vertically
+        proc_group.rowconfigure(1, weight=1)
+        
+        # DUMMY COLUMN TRICK: 
+        # Do not give weight to column 0 or 1. Give all horizontal weight to an empty column 2.
+        proc_group.columnconfigure(2, weight=1)
 
         self.window_time_var = tk.StringVar(value="0.3")
         self.noise_tol_var = tk.StringVar(value="20.0")
@@ -141,7 +148,9 @@ class TDMSGuiApp:
         ttk.Checkbutton(proc_group, text="All files", variable=self.process_all_var).grid(row=0, column=1, sticky="w")
 
         files_frame = ttk.Frame(proc_group)
-        files_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 6))
+        # CHANGE: Make files_frame span 3 columns so it reaches into the expanding column 2
+        files_frame.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(2, 6))
+        
         self.process_file_listbox = tk.Listbox(files_frame, selectmode=tk.EXTENDED, height=8, exportselection=False)
         self.process_file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         list_scroll = ttk.Scrollbar(files_frame, orient=tk.VERTICAL, command=self.process_file_listbox.yview)
@@ -150,7 +159,6 @@ class TDMSGuiApp:
 
         ttk.Label(proc_group, text="Window time (s)").grid(row=2, column=0, sticky="w")
         ttk.Entry(proc_group, textvariable=self.window_time_var, width=10).grid(row=2, column=1, sticky="w")
-
         ttk.Label(proc_group, text="Noise tolerance").grid(row=3, column=0, sticky="w")
         ttk.Entry(proc_group, textvariable=self.noise_tol_var, width=10).grid(row=3, column=1, sticky="w")
 
