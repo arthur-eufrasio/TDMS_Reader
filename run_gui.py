@@ -1,5 +1,6 @@
 import os
 import glob
+import csv
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
@@ -22,6 +23,20 @@ class TDMSGuiApp:
         self.source_path = None
         self.available_paths = []
         self.channels_by_group = {}
+
+        # Per (channel, file) parameters and manual region
+        self.param_store = {}
+        self.default_param_template = {
+            'window_time': 0.3,
+            'noise_tolerance': 20.0,
+            'cutoff_freq': 10.0,
+            'filter_order': 5,
+            'trigger_threshold': 5.0,
+            'margin_fraction': 0.1,
+            'manual_start': None,
+            'manual_end': None,
+        }
+
         self.current_file = None
         self.selection_start = None
         self.selection_end = None
@@ -33,10 +48,25 @@ class TDMSGuiApp:
         self.main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         self.main_pane.pack(fill=tk.BOTH, expand=True)
 
-        self.controls_frame = ttk.Frame(self.main_pane, padding=10)
+        # Scrollable controls column
+        self.controls_container = ttk.Frame(self.main_pane)
+        self.controls_canvas = tk.Canvas(self.controls_container, highlightthickness=0)
+        self.controls_scrollbar = ttk.Scrollbar(self.controls_container, orient=tk.VERTICAL, command=self.controls_canvas.yview)
+        self.controls_canvas.configure(yscrollcommand=self.controls_scrollbar.set)
+
+        self.controls_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.controls_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.controls_frame = ttk.Frame(self.controls_canvas, padding=10)
+        self.controls_window = self.controls_canvas.create_window((0, 0), window=self.controls_frame, anchor='nw')
+
+        self.controls_frame.bind('<Configure>', self._on_controls_frame_configure)
+        self.controls_canvas.bind('<Configure>', self._on_controls_canvas_configure)
+        self.controls_canvas.bind_all('<MouseWheel>', self._on_mouse_wheel)
+
         self.plot_frame = ttk.Frame(self.main_pane, padding=10)
 
-        self.main_pane.add(self.controls_frame, weight=1)
+        self.main_pane.add(self.controls_container, weight=1)
         self.main_pane.add(self.plot_frame, weight=3)
 
         self._build_controls()
@@ -63,7 +93,7 @@ class TDMSGuiApp:
 
         source_group.columnconfigure(0, weight=1)
 
-        # File and display
+        # View
         view_group = ttk.LabelFrame(self.controls_frame, text="2) View", padding=8)
         view_group.pack(fill=tk.X, pady=4)
 
@@ -95,7 +125,7 @@ class TDMSGuiApp:
 
         view_group.columnconfigure(0, weight=1)
 
-        # Processing controls
+        # Processing
         proc_group = ttk.LabelFrame(self.controls_frame, text="3) Processing", padding=8)
         proc_group.pack(fill=tk.X, pady=4)
 
@@ -112,7 +142,7 @@ class TDMSGuiApp:
 
         files_frame = ttk.Frame(proc_group)
         files_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 6))
-        self.process_file_listbox = tk.Listbox(files_frame, selectmode=tk.EXTENDED, height=4, exportselection=False)
+        self.process_file_listbox = tk.Listbox(files_frame, selectmode=tk.EXTENDED, height=8, exportselection=False)
         self.process_file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         list_scroll = ttk.Scrollbar(files_frame, orient=tk.VERTICAL, command=self.process_file_listbox.yview)
         list_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -148,11 +178,23 @@ class TDMSGuiApp:
             row=10, column=0, columnspan=2, sticky="ew", pady=(4, 0)
         )
 
-        ttk.Button(proc_group, text="Run Automatic Pipeline", command=self._run_automatic_pipeline).grid(
-            row=11, column=0, columnspan=2, sticky="ew", pady=(4, 0)
+        tk.Button(
+            proc_group,
+            text="Run Automatic Pipeline",
+            command=self._run_automatic_pipeline,
+            bg="#1f6aa5",
+            fg="white",
+            activebackground="#2b7bbb",
+            activeforeground="white",
+            relief=tk.RAISED,
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=11, column=0, columnspan=2, sticky="ew", pady=(14, 0), ipady=4)
+
+        ttk.Button(proc_group, text="Export Mean Forces CSV", command=self._export_force_csv).grid(
+            row=12, column=0, columnspan=2, sticky="ew", pady=(8, 0)
         )
 
-        # Selection and editing tools
+        # Region selection
         select_group = ttk.LabelFrame(self.controls_frame, text="4) Region Selection", padding=8)
         select_group.pack(fill=tk.X, pady=4)
 
@@ -184,11 +226,11 @@ class TDMSGuiApp:
             row=7, column=0, columnspan=2, sticky="ew", pady=(4, 0)
         )
 
-        # Log output
+        # Output
         log_group = ttk.LabelFrame(self.controls_frame, text="5) Output", padding=8)
         log_group.pack(fill=tk.BOTH, expand=True, pady=4)
 
-        self.log_text = ScrolledText(log_group, height=10)
+        self.log_text = ScrolledText(log_group, height=12)
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
     def _build_plot(self):
@@ -214,6 +256,80 @@ class TDMSGuiApp:
             drag_from_anywhere=True,
             props=dict(alpha=0.2, facecolor="tab:green")
         )
+
+    def _on_controls_frame_configure(self, _event):
+        self.controls_canvas.configure(scrollregion=self.controls_canvas.bbox('all'))
+
+    def _on_controls_canvas_configure(self, event):
+        self.controls_canvas.itemconfig(self.controls_window, width=event.width)
+
+    def _on_mouse_wheel(self, event):
+        try:
+            self.controls_canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        except Exception:
+            pass
+
+    def _make_param_key(self, file_name, channel_name):
+        return (channel_name, file_name)
+
+    def _ensure_params_for_file_channel(self, file_name, channel_name):
+        key = self._make_param_key(file_name, channel_name)
+        if key not in self.param_store:
+            self.param_store[key] = dict(self.default_param_template)
+        return self.param_store[key]
+
+    def _load_ui_params_for_current(self):
+        channel = self.channel_var.get().strip()
+        if not self.current_file or not channel:
+            return
+
+        params = self._ensure_params_for_file_channel(self.current_file, channel)
+        self.window_time_var.set(str(params['window_time']))
+        self.noise_tol_var.set(str(params['noise_tolerance']))
+        self.cutoff_var.set(str(params['cutoff_freq']))
+        self.order_var.set(str(int(params['filter_order'])))
+        self.trigger_var.set(str(params['trigger_threshold']))
+        self.margin_var.set(str(params['margin_fraction']))
+
+        self.selection_start = params['manual_start']
+        self.selection_end = params['manual_end']
+        self.sel_start_var.set("" if params['manual_start'] is None else f"{params['manual_start']:.6f}")
+        self.sel_end_var.set("" if params['manual_end'] is None else f"{params['manual_end']:.6f}")
+
+        if self.processor and self.current_file in self.processor.data and self.selection_start is not None and self.selection_end is not None:
+            try:
+                self.processor.compute_manual_force_in_time_span(
+                    self.selection_start,
+                    self.selection_end,
+                    target_files=[self.current_file],
+                    use_filtered=True,
+                )
+            except Exception:
+                pass
+
+    def _save_ui_params_to_targets(self, target_files, include_manual_region=False):
+        channel = self.channel_var.get().strip()
+        if not channel:
+            return
+
+        window_time = float(self.window_time_var.get())
+        noise_tol = float(self.noise_tol_var.get())
+        cutoff = float(self.cutoff_var.get())
+        order = int(self.order_var.get())
+        trig = float(self.trigger_var.get())
+        margin = float(self.margin_var.get())
+
+        for file_name in target_files:
+            params = self._ensure_params_for_file_channel(file_name, channel)
+            params['window_time'] = window_time
+            params['noise_tolerance'] = noise_tol
+            params['cutoff_freq'] = cutoff
+            params['filter_order'] = order
+            params['trigger_threshold'] = trig
+            params['margin_fraction'] = margin
+            if include_manual_region:
+                params['manual_start'] = self.selection_start
+                params['manual_end'] = self.selection_end
 
     def _browse_file(self):
         path = filedialog.askopenfilename(filetypes=[("TDMS files", "*.tdms"), ("All files", "*.*")])
@@ -319,7 +435,10 @@ class TDMSGuiApp:
             if files:
                 self.current_file = files[0]
                 self.file_var.set(files[0])
+                for file_name in files:
+                    self._ensure_params_for_file_channel(file_name, channel)
 
+            self._load_ui_params_for_current()
             self._log(f"Signal loaded for Group='{group}', Channel='{channel}' ({len(files)} file(s)).")
 
             if auto_run:
@@ -331,7 +450,12 @@ class TDMSGuiApp:
             messagebox.showerror("Load error", str(exc))
 
     def _on_file_changed(self):
+        previous_file = self.current_file
+        if previous_file and self.channel_var.get().strip():
+            self._save_ui_params_to_targets([previous_file], include_manual_region=True)
+
         self.current_file = self.file_var.get()
+        self._load_ui_params_for_current()
         self.refresh_plot()
 
     def _get_target_files(self):
@@ -355,6 +479,10 @@ class TDMSGuiApp:
         self.selection_end = end
         self.sel_start_var.set(f"{start:.6f}")
         self.sel_end_var.set(f"{end:.6f}")
+
+        if self.current_file and self.channel_var.get().strip():
+            self._save_ui_params_to_targets([self.current_file], include_manual_region=True)
+
         self._log(f"Selected interval: [{start:.4f}, {end:.4f}] s")
         self._manual_compute_force()
 
@@ -364,8 +492,12 @@ class TDMSGuiApp:
             end = float(self.sel_end_var.get().strip())
             if end <= start:
                 raise ValueError("End must be greater than start.")
+
             self.selection_start = start
             self.selection_end = end
+            if self.current_file and self.channel_var.get().strip():
+                self._save_ui_params_to_targets([self.current_file], include_manual_region=True)
+
             self._manual_compute_force()
         except Exception as exc:
             messagebox.showerror("Invalid range", str(exc))
@@ -374,14 +506,16 @@ class TDMSGuiApp:
         if self.processor is None:
             return
         try:
-            window_time = float(self.window_time_var.get())
-            noise_tol = float(self.noise_tol_var.get())
             target_files = self._get_target_files()
-            self.processor.drift_offset_correction(
-                window_time=window_time,
-                noise_tolerance=noise_tol,
-                target_files=target_files,
-            )
+            self._save_ui_params_to_targets(target_files)
+
+            for file_name in target_files:
+                params = self._ensure_params_for_file_channel(file_name, self.channel_var.get().strip())
+                self.processor.drift_offset_correction(
+                    window_time=params['window_time'],
+                    noise_tolerance=params['noise_tolerance'],
+                    target_files=[file_name],
+                )
             self._log(f"Drift correction applied to {len(target_files)} file(s).")
             self.refresh_plot()
         except Exception as exc:
@@ -391,15 +525,17 @@ class TDMSGuiApp:
         if self.processor is None:
             return
         try:
-            cutoff = float(self.cutoff_var.get())
-            order = int(self.order_var.get())
             target_files = self._get_target_files()
-            self.processor.apply_lowpass_filter(
-                cutoff_freq=cutoff,
-                order=order,
-                target_files=target_files,
-            )
-            self._log(f"Lowpass filter applied to {len(target_files)} file(s). cutoff={cutoff}, order={order}")
+            self._save_ui_params_to_targets(target_files)
+
+            for file_name in target_files:
+                params = self._ensure_params_for_file_channel(file_name, self.channel_var.get().strip())
+                self.processor.apply_lowpass_filter(
+                    cutoff_freq=params['cutoff_freq'],
+                    order=params['filter_order'],
+                    target_files=[file_name],
+                )
+            self._log(f"Lowpass filter applied to {len(target_files)} file(s).")
             self.refresh_plot()
         except Exception as exc:
             messagebox.showerror("Filter error", str(exc))
@@ -408,14 +544,17 @@ class TDMSGuiApp:
         if self.processor is None:
             return
         try:
-            trig = float(self.trigger_var.get())
-            margin = float(self.margin_var.get())
             target_files = self._get_target_files()
-            self.processor.compute_average_cutting_force(
-                trigger_threshold=trig,
-                margin_fraction=margin,
-                target_files=target_files,
-            )
+            self._save_ui_params_to_targets(target_files)
+
+            for file_name in target_files:
+                params = self._ensure_params_for_file_channel(file_name, self.channel_var.get().strip())
+                self.processor.compute_average_cutting_force(
+                    trigger_threshold=params['trigger_threshold'],
+                    margin_fraction=params['margin_fraction'],
+                    target_files=[file_name],
+                )
+
             self._log(f"Auto mean force computed for {len(target_files)} file(s).")
             for fname, force in self.processor.get_force_results().items():
                 self._log(f"  {fname}: mean_force={force:.4f}")
@@ -427,29 +566,26 @@ class TDMSGuiApp:
         if self.processor is None:
             return
 
-        window_time = float(self.window_time_var.get())
-        noise_tol = float(self.noise_tol_var.get())
-        cutoff = float(self.cutoff_var.get())
-        order = int(self.order_var.get())
-        trig = float(self.trigger_var.get())
-        margin = float(self.margin_var.get())
+        target_files = list(self.processor.data.keys())
+        self._save_ui_params_to_targets(target_files)
 
         self._log("Running automatic pipeline per file (drift -> filter -> auto force)...")
-        for filename in self.processor.data.keys():
+        for filename in target_files:
             try:
+                params = self._ensure_params_for_file_channel(filename, self.channel_var.get().strip())
                 self.processor.drift_offset_correction(
-                    window_time=window_time,
-                    noise_tolerance=noise_tol,
+                    window_time=params['window_time'],
+                    noise_tolerance=params['noise_tolerance'],
                     target_files=[filename],
                 )
                 self.processor.apply_lowpass_filter(
-                    cutoff_freq=cutoff,
-                    order=order,
+                    cutoff_freq=params['cutoff_freq'],
+                    order=params['filter_order'],
                     target_files=[filename],
                 )
                 self.processor.compute_average_cutting_force(
-                    trigger_threshold=trig,
-                    margin_fraction=margin,
+                    trigger_threshold=params['trigger_threshold'],
+                    margin_fraction=params['margin_fraction'],
                     target_files=[filename],
                 )
             except Exception as exc:
@@ -474,6 +610,10 @@ class TDMSGuiApp:
             )
             for fname, force in results.items():
                 self._log(f"Manual mean force | {fname}: {force:.4f}")
+
+            if self.current_file and self.channel_var.get().strip():
+                self._save_ui_params_to_targets([self.current_file], include_manual_region=True)
+
             self.refresh_plot()
         except Exception as exc:
             messagebox.showerror("Manual force error", str(exc))
@@ -531,6 +671,85 @@ class TDMSGuiApp:
             self.refresh_plot()
         except Exception as exc:
             messagebox.showerror("Keep-only span error", str(exc))
+
+    def _export_force_csv(self):
+        if not self.source_path:
+            messagebox.showwarning("Missing source", "Load a source before exporting.")
+            return
+
+        group = self.group_var.get().strip()
+        if not group:
+            messagebox.showwarning("Missing group", "Select a group before exporting.")
+            return
+
+        channel_names = self.channels_by_group.get(group, [])
+        canonical = {'fx': None, 'fy': None, 'fz': None}
+        for ch in channel_names:
+            lower = ch.strip().lower()
+            if lower in canonical and canonical[lower] is None:
+                canonical[lower] = ch
+
+        if not all(canonical.values()):
+            messagebox.showerror("Missing channels", "Could not find Fx/Fy/Fz channels in selected group.")
+            return
+
+        save_path = filedialog.asksaveasfilename(
+            defaultextension='.csv',
+            filetypes=[('CSV files', '*.csv')],
+            initialfile='mean_forces_summary.csv',
+        )
+        if not save_path:
+            return
+
+        files = sorted([os.path.basename(p) for p in self._resolve_tdms_paths(self.source_path)])
+        rows = {f: {'fx': '', 'fy': '', 'fz': ''} for f in files}
+
+        try:
+            for axis in ('fx', 'fy', 'fz'):
+                channel_name = canonical[axis]
+                proc = AutomaticSignalProcessor(path=self.source_path, group_name=group, channel_name=channel_name)
+
+                for file_name in sorted(proc.data.keys()):
+                    params = self._ensure_params_for_file_channel(file_name, channel_name)
+
+                    proc.drift_offset_correction(
+                        window_time=params['window_time'],
+                        noise_tolerance=params['noise_tolerance'],
+                        target_files=[file_name],
+                    )
+                    proc.apply_lowpass_filter(
+                        cutoff_freq=params['cutoff_freq'],
+                        order=params['filter_order'],
+                        target_files=[file_name],
+                    )
+                    proc.compute_average_cutting_force(
+                        trigger_threshold=params['trigger_threshold'],
+                        margin_fraction=params['margin_fraction'],
+                        target_files=[file_name],
+                    )
+
+                    if params['manual_start'] is not None and params['manual_end'] is not None:
+                        manual = proc.compute_manual_force_in_time_span(
+                            params['manual_start'],
+                            params['manual_end'],
+                            target_files=[file_name],
+                            use_filtered=True,
+                        )
+                        value = manual[file_name]
+                    else:
+                        value = proc.data[file_name].get('mean_force', '')
+
+                    rows[file_name][axis] = f"{value:.4f}" if value != '' else ''
+
+            with open(save_path, 'w', newline='', encoding='utf-8') as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(['file', 'fx', 'fy', 'fz'])
+                for file_name in files:
+                    writer.writerow([file_name, rows[file_name]['fx'], rows[file_name]['fy'], rows[file_name]['fz']])
+
+            self._log(f"CSV exported: {save_path}")
+        except Exception as exc:
+            messagebox.showerror("CSV export error", str(exc))
 
     def refresh_plot(self):
         self.ax.clear()
