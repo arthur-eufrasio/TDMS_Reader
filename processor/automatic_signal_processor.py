@@ -136,7 +136,7 @@ class AutomaticSignalProcessor:
         fs_val = 1 / ts_val
         return data, fs_val, ts_val
     
-    def drift_offset_correction(self, window_time=0.3, noise_tolerance=5.0):
+    def drift_offset_correction(self, window_time=0.3, noise_tolerance=5.0, target_files=None):
         """
         Removes linear drift and DC offset from the raw signals across all files.
         
@@ -151,7 +151,12 @@ class AutomaticSignalProcessor:
         Raises:
             RuntimeError: If the edges show cutting activity or a signal is too short.
         """
-        for filename, file_data in self.data.items():
+        filenames = self._normalize_target_files(target_files)
+        if not filenames:
+            raise ValueError("No valid target files provided for drift correction.")
+
+        for filename in filenames:
+            file_data = self.data[filename]
             raw_data = file_data['raw']
             fs = file_data['fs']
             window = int(window_time * fs)
@@ -186,7 +191,7 @@ class AutomaticSignalProcessor:
 
             self.data[filename]['corrected'] = corrected
             
-    def apply_lowpass_filter(self, cutoff_freq=250, order=5):
+    def apply_lowpass_filter(self, cutoff_freq=250, order=5, target_files=None):
         """
         Applies a zero-phase Butterworth low-pass filter to all corrected signals.
         
@@ -200,10 +205,15 @@ class AutomaticSignalProcessor:
         Raises:
             AttributeError: If `corrected` data does not exist for a file.
         """
-        if not any('corrected' in d for d in self.data.values()):
-            raise AttributeError("No 'corrected' data found. Call 'drift_offset_correction' before filtering.")
-            
-        for filename, file_data in self.data.items():
+        filenames = self._normalize_target_files(target_files)
+        if not filenames:
+            raise ValueError("No valid target files provided for filtering.")
+
+        if not any('corrected' in self.data[f] for f in filenames):
+            raise AttributeError("No 'corrected' data found for selected files. Call 'drift_offset_correction' first.")
+
+        for filename in filenames:
+            file_data = self.data[filename]
             if 'corrected' not in file_data:
                 continue
                 
@@ -225,19 +235,7 @@ class AutomaticSignalProcessor:
             target_files (str or list of str, optional): A specific filename or list of filenames 
                                                          (e.g., 'cut_01.tdms'). If None, applies to all files.
         """
-        # Wrap a single string into a list for uniform handling
-        if target_files is not None:
-            if isinstance(target_files, str):
-                target_files = [target_files]
-        else:
-            # If no specific files are targeted, apply to all files in the dictionary
-            target_files = list(self.data.keys())
-
-        for filename in target_files:
-            if filename not in self.data:
-                print(f"Warning: File '{filename}' not found in processor data. Skipping.")
-                continue
-                
+        for filename in self._normalize_target_files(target_files):
             file_data = self.data[filename]
             
             if 'filtered' not in file_data:
@@ -425,7 +423,8 @@ class AutomaticSignalProcessor:
     def compute_average_cutting_force(self,
                                       trigger_threshold=20.0,
                                       margin_fraction=0.2,
-                                      use_filtered=True):
+                                      use_filtered=True,
+                                      target_files=None):
         """
         Detects the cutting interval via a simple amplitude threshold ('trigger')
         and computes the average cutting force in the central (steady-state)
@@ -442,7 +441,12 @@ class AutomaticSignalProcessor:
         if not (0.0 <= margin_fraction < 0.5):
             raise ValueError("margin_fraction must be in [0.0, 0.5).")
 
-        for filename, file_data in self.data.items():
+        filenames = self._normalize_target_files(target_files)
+        if not filenames:
+            raise ValueError("No valid target files provided for force computation.")
+
+        for filename in filenames:
+            file_data = self.data[filename]
             if use_filtered and 'filtered' in file_data:
                 signal = file_data['filtered']
             elif 'corrected' in file_data:
