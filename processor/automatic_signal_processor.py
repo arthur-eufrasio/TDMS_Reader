@@ -61,6 +61,29 @@ class AutomaticSignalProcessor:
                 't_full': np.arange(len(raw)) * ts
             }
 
+    def _normalize_target_files(self, target_files=None):
+        """
+        Normalizes user input for file selection.
+
+        Args:
+            target_files (None, str, or list[str]): Target files.
+
+        Returns:
+            list[str]: Existing filenames in self.data.
+        """
+        if target_files is None:
+            return list(self.data.keys())
+        if isinstance(target_files, str):
+            target_files = [target_files]
+        return [f for f in target_files if f in self.data]
+
+    def _rebuild_time_axis(self, file_data):
+        """
+        Rebuilds t_full after any edit that changes signal length.
+        """
+        length = len(file_data['raw'])
+        file_data['t_full'] = np.arange(length) * file_data['ts']
+
     def _read_data(self, filepath):
         """
         Extracts the group, channel, raw data, sampling frequency, and time step for a specific file.
@@ -234,6 +257,110 @@ class AutomaticSignalProcessor:
                 
             # Set the span to zero
             file_data['filtered'][start_idx:end_idx] = 0.0
+
+    def compute_manual_force_in_time_span(self, start_time, end_time, target_files=None, use_filtered=True):
+        """
+        Computes the mean force directly from a user-defined time interval.
+
+        This does not depend on trigger detection. Useful for GUI/manual workflows
+        where the user selects the force evaluation region interactively.
+
+        Args:
+            start_time (float): Interval start in seconds.
+            end_time (float): Interval end in seconds.
+            target_files (str or list[str], optional): Files to process. If None, all files are used.
+            use_filtered (bool): Prefer 'filtered' signal when available.
+
+        Returns:
+            dict: {filename: mean_force_manual}
+        """
+        if end_time <= start_time:
+            raise ValueError("end_time must be greater than start_time.")
+
+        results = {}
+        for filename in self._normalize_target_files(target_files):
+            file_data = self.data[filename]
+
+            if use_filtered and 'filtered' in file_data:
+                signal = file_data['filtered']
+            elif 'corrected' in file_data:
+                signal = file_data['corrected']
+            else:
+                signal = file_data['raw']
+
+            fs = file_data['fs']
+            start_idx = max(0, int(start_time * fs))
+            end_idx = min(len(signal), int(end_time * fs))
+
+            if start_idx >= end_idx:
+                raise ValueError(
+                    f"[{filename}] Invalid interval [{start_time}, {end_time}] after bounds clipping."
+                )
+
+            segment = signal[start_idx:end_idx]
+            mean_force = float(np.mean(segment))
+
+            file_data['manual_start_idx'] = start_idx
+            file_data['manual_end_idx'] = end_idx
+            file_data['manual_start_time'] = float(file_data['t_full'][start_idx])
+            file_data['manual_end_time'] = float(file_data['t_full'][end_idx - 1])
+            file_data['mean_force_manual'] = mean_force
+
+            results[filename] = mean_force
+
+        return results
+
+    def keep_only_time_span(self, start_time, end_time, target_files=None):
+        """
+        Trims each target file so only the selected time span remains.
+
+        The method slices all available signal representations ('raw', 'corrected',
+        and 'filtered') and rebuilds the time axis from zero.
+        """
+        if end_time <= start_time:
+            raise ValueError("end_time must be greater than start_time.")
+
+        signal_keys = ('raw', 'corrected', 'filtered')
+
+        for filename in self._normalize_target_files(target_files):
+            file_data = self.data[filename]
+            start_idx = max(0, int(start_time * file_data['fs']))
+            end_idx = min(len(file_data['raw']), int(end_time * file_data['fs']))
+
+            if start_idx >= end_idx:
+                raise ValueError(f"[{filename}] Invalid interval [{start_time}, {end_time}].")
+
+            for key in signal_keys:
+                if key in file_data:
+                    file_data[key] = file_data[key][start_idx:end_idx]
+
+            self._rebuild_time_axis(file_data)
+
+    def remove_time_span(self, start_time, end_time, target_files=None):
+        """
+        Removes a selected interval and stitches the remaining signal together.
+
+        The method edits 'raw', 'corrected', and 'filtered' when present, then
+        rebuilds the time axis from zero for consistency.
+        """
+        if end_time <= start_time:
+            raise ValueError("end_time must be greater than start_time.")
+
+        signal_keys = ('raw', 'corrected', 'filtered')
+
+        for filename in self._normalize_target_files(target_files):
+            file_data = self.data[filename]
+            start_idx = max(0, int(start_time * file_data['fs']))
+            end_idx = min(len(file_data['raw']), int(end_time * file_data['fs']))
+
+            if start_idx >= end_idx:
+                raise ValueError(f"[{filename}] Invalid interval [{start_time}, {end_time}].")
+
+            for key in signal_keys:
+                if key in file_data:
+                    file_data[key] = np.concatenate((file_data[key][:start_idx], file_data[key][end_idx:]))
+
+            self._rebuild_time_axis(file_data)
 
     def _detect_cutting_interval(self, signal, t_full, trigger_threshold, margin_fraction, filename, min_gap_sec=1.0):
         """
