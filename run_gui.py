@@ -999,9 +999,9 @@ class TDMSGuiApp:
             ss = state['manual_start_time']
             se = state['manual_end_time']
             mf = state.get('mean_force_manual')
-            self.ax.axvspan(ss, se, color='tab:orange', alpha=0.20, label='manual region')
+            self.ax.axvspan(ss, se, color='tab:purple', alpha=0.20, label='manual region')
             if mf is not None:
-                self.ax.plot([ss, se], [mf, mf], color='tab:orange', linestyle='--', linewidth=2, label=f"manual mean: {mf:.3f}")
+                self.ax.plot([ss, se], [mf, mf], color='tab:purple', linestyle='--', linewidth=2, label=f"manual mean: {mf:.3f}")
         elif state.get('auto_force_applied') and state.get('steady_start_time') is not None and state.get('steady_end_time') is not None:
             ss = state['steady_start_time']
             se = state['steady_end_time']
