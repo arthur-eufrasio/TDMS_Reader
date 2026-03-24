@@ -1,6 +1,7 @@
 import os
 import glob
 import csv
+import math
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
@@ -17,28 +18,14 @@ class TDMSGuiApp:
     def __init__(self, root):
         self.root = root
         self.root.title("TDMS Signal Analyzer")
-        self.root.geometry("1450x920")
+        self.root.geometry("1500x940")
 
         self.source_path = None
         self.available_paths = []
         self.channels_by_group = {}
 
-        # Loaded processors for each (group, channel)
         self.processor_map = {}
-
-        # Comprehensive per (group, channel, file) state
-        self.channel_file_state = {}
-        # Channel-level flags per (group, channel)
-        self.channel_state = {}
-
-        self.default_param_template = {
-            'window_time': 0.3,
-            'noise_tolerance': 20.0,
-            'cutoff_freq': 10.0,
-            'filter_order': 5,
-            'trigger_threshold': 5.0,
-            'margin_fraction': 0.1,
-        }
+        self.state_map = {}
 
         self.current_group = None
         self.current_channel = None
@@ -48,9 +35,21 @@ class TDMSGuiApp:
         self.selection_end = None
         self.span_selector = None
 
+        self.default_params = {
+            'window_time': 0.3,
+            'noise_tolerance': 20.0,
+            'cutoff_freq': 10.0,
+            'filter_order': 5,
+            'trigger_threshold': 5.0,
+            'margin_fraction': 0.1,
+            'min_gap_sec': 1.0,
+            'min_cut_time_sec': 0.4,
+            'expansion_time_sec': 0.2,
+        }
+
         self._build_ui()
 
-    # --------------------------- UI BUILD ---------------------------
+    # ----------------------------- UI -----------------------------
     def _build_ui(self):
         self.main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         self.main_pane.pack(fill=tk.BOTH, expand=True)
@@ -79,18 +78,17 @@ class TDMSGuiApp:
         self._build_plot()
 
     def _build_controls(self):
-        # 1) Data source
+        # 1) Load
         source_group = ttk.LabelFrame(self.controls_frame, text="1) Load Data", padding=8)
         source_group.pack(fill=tk.X, pady=4)
 
         self.path_var = tk.StringVar()
         self.group_var = tk.StringVar(value="")
         self.channel_var = tk.StringVar(value="")
+        self.active_file_var = tk.StringVar(value="")
 
         ttk.Label(source_group, text="TDMS file/folder:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(source_group, textvariable=self.path_var, width=36, state="readonly").grid(
-            row=1, column=0, sticky="ew", padx=(0, 4)
-        )
+        ttk.Entry(source_group, textvariable=self.path_var, width=36, state="readonly").grid(row=1, column=0, sticky="ew", padx=(0, 4))
 
         btns = ttk.Frame(source_group)
         btns.grid(row=1, column=1, sticky="e")
@@ -99,124 +97,102 @@ class TDMSGuiApp:
 
         source_group.columnconfigure(0, weight=1)
 
-        # 2) View
-        view_group = ttk.LabelFrame(self.controls_frame, text="2) View Raw / Results", padding=8)
-        view_group.pack(fill=tk.X, pady=4)
+        # 2) View + Adjust (merged)
+        merged_group = ttk.LabelFrame(self.controls_frame, text="2) View + Adjust", padding=8)
+        merged_group.pack(fill=tk.BOTH, expand=True, pady=4)
 
-        ttk.Label(view_group, text="File").grid(row=0, column=0, sticky="w")
-        self.file_var = tk.StringVar()
-        self.file_combo = ttk.Combobox(view_group, textvariable=self.file_var, state="readonly")
-        self.file_combo.grid(row=1, column=0, sticky="ew")
-        self.file_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_file_changed())
+        merged_group.columnconfigure(0, weight=1)
 
-        ttk.Label(view_group, text="Group").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        self.group_combo = ttk.Combobox(view_group, textvariable=self.group_var, state="readonly")
-        self.group_combo.grid(row=3, column=0, sticky="ew")
+        ttk.Label(merged_group, text="Group").grid(row=0, column=0, sticky="w")
+        self.group_combo = ttk.Combobox(merged_group, textvariable=self.group_var, state="readonly")
+        self.group_combo.grid(row=1, column=0, sticky="ew")
         self.group_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_group_changed())
 
-        ttk.Label(view_group, text="Channel").grid(row=4, column=0, sticky="w", pady=(6, 0))
-        self.channel_combo = ttk.Combobox(view_group, textvariable=self.channel_var, state="readonly")
-        self.channel_combo.grid(row=5, column=0, sticky="ew")
+        ttk.Label(merged_group, text="Channel").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.channel_combo = ttk.Combobox(merged_group, textvariable=self.channel_var, state="readonly")
+        self.channel_combo.grid(row=3, column=0, sticky="ew")
         self.channel_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_channel_changed())
 
-        ttk.Label(view_group, text="Display signals").grid(row=6, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(merged_group, text="Active file for region tool").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        self.active_file_combo = ttk.Combobox(merged_group, textvariable=self.active_file_var, state="readonly")
+        self.active_file_combo.grid(row=5, column=0, sticky="ew")
+        self.active_file_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_active_file_changed())
+
+        ttk.Label(merged_group, text="Files to view and adjust").grid(row=6, column=0, sticky="w", pady=(6, 0))
+        files_frame = ttk.Frame(merged_group)
+        files_frame.grid(row=7, column=0, sticky="nsew")
+        merged_group.rowconfigure(7, weight=1)
+
+        self.view_files_listbox = tk.Listbox(files_frame, selectmode=tk.EXTENDED, height=8, exportselection=False)
+        self.view_files_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.view_files_listbox.bind('<<ListboxSelect>>', lambda _e: self._on_view_files_changed())
+
+        list_scroll = ttk.Scrollbar(files_frame, orient=tk.VERTICAL, command=self.view_files_listbox.yview)
+        list_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.view_files_listbox.configure(yscrollcommand=list_scroll.set)
+
+        file_btns = ttk.Frame(merged_group)
+        file_btns.grid(row=8, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(file_btns, text="Select All Files", command=self._select_all_view_files).pack(side=tk.LEFT)
+        ttk.Button(file_btns, text="Clear Selection", command=self._clear_view_files_selection).pack(side=tk.LEFT, padx=(6, 0))
+
+        ttk.Label(merged_group, text="Display signals").grid(row=9, column=0, sticky="w", pady=(8, 0))
         self.show_raw_var = tk.BooleanVar(value=True)
         self.show_corrected_var = tk.BooleanVar(value=True)
         self.show_filtered_var = tk.BooleanVar(value=True)
 
-        display_opts = ttk.Frame(view_group)
-        display_opts.grid(row=7, column=0, sticky="w")
+        display_opts = ttk.Frame(merged_group)
+        display_opts.grid(row=10, column=0, sticky="w")
+        ttk.Checkbutton(display_opts, text="raw", variable=self.show_raw_var, command=self.refresh_plot).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(display_opts, text="corrected", variable=self.show_corrected_var, command=self.refresh_plot).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(display_opts, text="filtered", variable=self.show_filtered_var, command=self.refresh_plot).pack(side=tk.LEFT, padx=(0, 8))
 
-        self.chk_raw = ttk.Checkbutton(display_opts, text="raw", variable=self.show_raw_var, command=self.refresh_plot)
-        self.chk_corrected = ttk.Checkbutton(display_opts, text="corrected", variable=self.show_corrected_var, command=self.refresh_plot)
-        self.chk_filtered = ttk.Checkbutton(display_opts, text="filtered", variable=self.show_filtered_var, command=self.refresh_plot)
+        # Adjustable parameters used for viewed files
+        self.window_time_var = tk.StringVar(value=str(self.default_params['window_time']))
+        self.noise_tol_var = tk.StringVar(value=str(self.default_params['noise_tolerance']))
+        self.cutoff_var = tk.StringVar(value=str(self.default_params['cutoff_freq']))
+        self.order_var = tk.StringVar(value=str(self.default_params['filter_order']))
+        self.trigger_var = tk.StringVar(value=str(self.default_params['trigger_threshold']))
+        self.margin_var = tk.StringVar(value=str(self.default_params['margin_fraction']))
+        self.min_gap_var = tk.StringVar(value=str(self.default_params['min_gap_sec']))
+        self.min_cut_var = tk.StringVar(value=str(self.default_params['min_cut_time_sec']))
+        self.expand_var = tk.StringVar(value=str(self.default_params['expansion_time_sec']))
 
-        self.chk_raw.pack(side=tk.LEFT, padx=(0, 8))
-        # corrected and filtered appear only after automatic pipeline for the selected channel
+        params_frame = ttk.Frame(merged_group)
+        params_frame.grid(row=11, column=0, sticky="ew", pady=(8, 0))
 
-        view_group.columnconfigure(0, weight=1)
+        ttk.Label(params_frame, text="Window(s)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(params_frame, textvariable=self.window_time_var, width=8).grid(row=0, column=1, sticky="w")
+        ttk.Label(params_frame, text="Noise tol").grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Entry(params_frame, textvariable=self.noise_tol_var, width=8).grid(row=0, column=3, sticky="w")
 
-        # 3) Processing
-        proc_group = ttk.LabelFrame(self.controls_frame, text="3) Parameters + Automatic Pipeline", padding=8)
-        proc_group.pack(fill=tk.BOTH, expand=True, pady=4)
+        ttk.Label(params_frame, text="Cutoff(Hz)").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(params_frame, textvariable=self.cutoff_var, width=8).grid(row=1, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(params_frame, text="Order").grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(4, 0))
+        ttk.Entry(params_frame, textvariable=self.order_var, width=8).grid(row=1, column=3, sticky="w", pady=(4, 0))
 
-        proc_group.rowconfigure(1, weight=1)
-        proc_group.columnconfigure(2, weight=1)
+        ttk.Label(params_frame, text="Trigger").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(params_frame, textvariable=self.trigger_var, width=8).grid(row=2, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(params_frame, text="Margin").grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(4, 0))
+        ttk.Entry(params_frame, textvariable=self.margin_var, width=8).grid(row=2, column=3, sticky="w", pady=(4, 0))
 
-        self.window_time_var = tk.StringVar(value="0.3")
-        self.noise_tol_var = tk.StringVar(value="20.0")
-        self.cutoff_var = tk.StringVar(value="10")
-        self.order_var = tk.StringVar(value="5")
-        self.trigger_var = tk.StringVar(value="5.0")
-        self.margin_var = tk.StringVar(value="0.1")
-        self.process_all_var = tk.BooleanVar(value=True)
+        ttk.Label(params_frame, text="Min gap(s)").grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(params_frame, textvariable=self.min_gap_var, width=8).grid(row=3, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(params_frame, text="Min cut(s)").grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(4, 0))
+        ttk.Entry(params_frame, textvariable=self.min_cut_var, width=8).grid(row=3, column=3, sticky="w", pady=(4, 0))
 
-        ttk.Label(proc_group, text="Target files for adjust").grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(proc_group, text="All files", variable=self.process_all_var).grid(row=0, column=1, sticky="w")
+        ttk.Label(params_frame, text="Expand(s)").grid(row=4, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(params_frame, textvariable=self.expand_var, width=8).grid(row=4, column=1, sticky="w", pady=(4, 0))
 
-        files_frame = ttk.Frame(proc_group)
-        files_frame.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(2, 6))
-        self.process_file_listbox = tk.Listbox(files_frame, selectmode=tk.EXTENDED, height=8, exportselection=False)
-        self.process_file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        list_scroll = ttk.Scrollbar(files_frame, orient=tk.VERTICAL, command=self.process_file_listbox.yview)
-        list_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.process_file_listbox.configure(yscrollcommand=list_scroll.set)
-
-        ttk.Label(proc_group, text="Window time (s)").grid(row=2, column=0, sticky="w")
-        self.window_entry = ttk.Entry(proc_group, textvariable=self.window_time_var, width=10)
-        self.window_entry.grid(row=2, column=1, sticky="w")
-
-        ttk.Label(proc_group, text="Noise tolerance").grid(row=3, column=0, sticky="w")
-        self.noise_entry = ttk.Entry(proc_group, textvariable=self.noise_tol_var, width=10)
-        self.noise_entry.grid(row=3, column=1, sticky="w")
-
-        self.btn_apply_drift = ttk.Button(proc_group, text="Apply Drift Correction (Adjust)", command=self._apply_drift)
-        self.btn_apply_drift.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 6))
-
-        ttk.Label(proc_group, text="Lowpass cutoff (Hz)").grid(row=5, column=0, sticky="w")
-        self.cutoff_entry = ttk.Entry(proc_group, textvariable=self.cutoff_var, width=10)
-        self.cutoff_entry.grid(row=5, column=1, sticky="w")
-
-        ttk.Label(proc_group, text="Filter order").grid(row=6, column=0, sticky="w")
-        self.order_entry = ttk.Entry(proc_group, textvariable=self.order_var, width=10)
-        self.order_entry.grid(row=6, column=1, sticky="w")
-
-        self.btn_apply_filter = ttk.Button(proc_group, text="Apply Lowpass (Adjust)", command=self._apply_filter)
-        self.btn_apply_filter.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(4, 6))
-
-        ttk.Label(proc_group, text="Trigger threshold (auto step)").grid(row=8, column=0, sticky="w")
-        self.trigger_entry = ttk.Entry(proc_group, textvariable=self.trigger_var, width=10)
-        self.trigger_entry.grid(row=8, column=1, sticky="w")
-
-        ttk.Label(proc_group, text="Margin fraction (auto step)").grid(row=9, column=0, sticky="w")
-        self.margin_entry = ttk.Entry(proc_group, textvariable=self.margin_var, width=10)
-        self.margin_entry.grid(row=9, column=1, sticky="w")
-
-        self.btn_auto_compute = ttk.Button(proc_group, text="Auto Compute Mean Force", command=self._auto_compute_force)
-        self.btn_auto_compute.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-
-        self.btn_pipeline = tk.Button(
-            proc_group,
-            text="Run Automatic Pipeline",
-            command=self._run_automatic_pipeline,
-            bg="#1f6aa5",
-            fg="white",
-            activebackground="#2b7bbb",
-            activeforeground="white",
-            relief=tk.RAISED,
-            font=("Segoe UI", 10, "bold"),
-        )
-        self.btn_pipeline.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(14, 0), ipady=4)
-
-        ttk.Button(proc_group, text="Export Mean Forces CSV", command=self._export_force_csv).grid(
-            row=12, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+        ttk.Button(merged_group, text="Apply Parameters To Viewed Files", command=self._apply_params_to_viewed_files).grid(
+            row=12, column=0, sticky="ew", pady=(8, 0)
         )
 
-        # 4) Region selection
-        select_group = ttk.LabelFrame(self.controls_frame, text="4) Region Selection (Adjust)", padding=8)
+        # 3) Region selection
+        select_group = ttk.LabelFrame(self.controls_frame, text="3) Region Selection", padding=8)
         select_group.pack(fill=tk.X, pady=4)
 
-        ttk.Label(select_group, text="Drag on chart to select region").grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(select_group, text="Drag in plot (single-file view) or enter range").grid(row=0, column=0, columnspan=3, sticky="w")
 
         self.sel_start_var = tk.StringVar(value="")
         self.sel_end_var = tk.StringVar(value="")
@@ -227,37 +203,23 @@ class TDMSGuiApp:
         ttk.Label(select_group, text="End (s)").grid(row=2, column=0, sticky="w")
         ttk.Entry(select_group, textvariable=self.sel_end_var, width=10).grid(row=2, column=1, sticky="w")
 
-        ttk.Button(select_group, text="Use Entry Range", command=self._apply_entry_range).grid(
-            row=3, column=0, columnspan=2, sticky="ew", pady=(4, 6)
-        )
+        ttk.Button(select_group, text="Use Entry Range", command=self._apply_entry_range).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 6))
+        ttk.Button(select_group, text="Manual Mean Force (Active File)", command=self._manual_compute_force).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Button(select_group, text="Zero Selected Region", command=self._zero_selected_region).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Button(select_group, text="Remove Selected Region", command=self._remove_selected_region).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Button(select_group, text="Keep Only Selected Region", command=self._keep_only_selected_region).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(4, 0))
 
-        ttk.Button(select_group, text="Manual Mean Force (Selected)", command=self._manual_compute_force).grid(
-            row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0)
-        )
-        ttk.Button(select_group, text="Zero Selected Region", command=self._zero_selected_region).grid(
-            row=5, column=0, columnspan=2, sticky="ew", pady=(4, 0)
-        )
-        ttk.Button(select_group, text="Remove Selected Region", command=self._remove_selected_region).grid(
-            row=6, column=0, columnspan=2, sticky="ew", pady=(4, 0)
-        )
-        ttk.Button(select_group, text="Keep Only Selected Region", command=self._keep_only_selected_region).grid(
-            row=7, column=0, columnspan=2, sticky="ew", pady=(4, 0)
-        )
+        # 4) Export and output
+        out_group = ttk.LabelFrame(self.controls_frame, text="4) Export + Output", padding=8)
+        out_group.pack(fill=tk.BOTH, expand=True, pady=4)
 
-        # 5) Output
-        log_group = ttk.LabelFrame(self.controls_frame, text="5) Output", padding=8)
-        log_group.pack(fill=tk.BOTH, expand=True, pady=4)
+        ttk.Button(out_group, text="Export Mean Forces CSV", command=self._export_force_csv).pack(fill=tk.X)
 
-        self.log_text = ScrolledText(log_group, height=12)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text = ScrolledText(out_group, height=10)
+        self.log_text.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
 
     def _build_plot(self):
         self.figure = Figure(figsize=(8, 5), dpi=100)
-        self.ax = self.figure.add_subplot(111)
-        self.ax.set_xlabel("Time (s)")
-        self.ax.set_ylabel("Amplitude")
-        self.ax.grid(True, linestyle="--", alpha=0.4)
-
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_frame)
         self.canvas.draw()
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
@@ -265,17 +227,7 @@ class TDMSGuiApp:
         toolbar = NavigationToolbar2Tk(self.canvas, self.plot_frame)
         toolbar.update()
 
-        self.span_selector = SpanSelector(
-            self.ax,
-            self._on_region_selected,
-            "horizontal",
-            useblit=True,
-            interactive=True,
-            drag_from_anywhere=True,
-            props=dict(alpha=0.2, facecolor="tab:green")
-        )
-
-    # --------------------------- SCROLL HELPERS ---------------------------
+    # ----------------------------- SCROLL -----------------------------
     def _on_controls_frame_configure(self, _event):
         self.controls_canvas.configure(scrollregion=self.controls_canvas.bbox('all'))
 
@@ -288,69 +240,57 @@ class TDMSGuiApp:
         except Exception:
             pass
 
-    # --------------------------- STATE HELPERS ---------------------------
-    def _state_key(self, group_name, channel_name, file_name):
-        return (group_name, channel_name, file_name)
-
+    # ----------------------------- KEYS/STATE -----------------------------
     def _channel_key(self, group_name, channel_name):
         return (group_name, channel_name)
 
-    def _ensure_channel_state(self, group_name, channel_name):
-        key = self._channel_key(group_name, channel_name)
-        if key not in self.channel_state:
-            self.channel_state[key] = {
-                'auto_pipeline_done': False,
-                'trigger_threshold': self.default_param_template['trigger_threshold'],
-                'margin_fraction': self.default_param_template['margin_fraction'],
-            }
-        return self.channel_state[key]
+    def _state_key(self, group_name, channel_name, file_name):
+        return (group_name, channel_name, file_name)
 
-    def _ensure_file_channel_state(self, group_name, channel_name, file_name, file_data):
+    def _ensure_state(self, group_name, channel_name, file_name, file_data):
         key = self._state_key(group_name, channel_name, file_name)
-        if key not in self.channel_file_state:
-            self.channel_file_state[key] = {
-                # Immutable raw load context
+        if key not in self.state_map:
+            self.state_map[key] = {
                 'group': group_name,
                 'channel': channel_name,
                 'file': file_name,
                 'fs': file_data['fs'],
                 'ts': file_data['ts'],
                 'raw': file_data['raw'].copy(),
-                't_full_raw': file_data['t_full'].copy(),
+                't_full': file_data['t_full'].copy(),
 
-                # Adjustable parameters
-                'window_time': self.default_param_template['window_time'],
-                'noise_tolerance': self.default_param_template['noise_tolerance'],
-                'cutoff_freq': self.default_param_template['cutoff_freq'],
-                'filter_order': self.default_param_template['filter_order'],
+                # Adjustable params
+                'window_time': self.default_params['window_time'],
+                'noise_tolerance': self.default_params['noise_tolerance'],
+                'cutoff_freq': self.default_params['cutoff_freq'],
+                'filter_order': self.default_params['filter_order'],
+                'trigger_threshold': self.default_params['trigger_threshold'],
+                'margin_fraction': self.default_params['margin_fraction'],
+                'min_gap_sec': self.default_params['min_gap_sec'],
+                'min_cut_time_sec': self.default_params['min_cut_time_sec'],
+                'expansion_time_sec': self.default_params['expansion_time_sec'],
 
-                # Auto-step parameters (channel-level defaults copied here for traceability)
-                'trigger_threshold': self.default_param_template['trigger_threshold'],
-                'margin_fraction': self.default_param_template['margin_fraction'],
-
-                # Regions and computed values
+                # Regions and results
                 'tri_start_time': None,
                 'tri_end_time': None,
                 'steady_start_time': None,
                 'steady_end_time': None,
+                'expanded_start_time': None,
+                'expanded_end_time': None,
+                'corr_left_start_time': None,
+                'corr_left_end_time': None,
+                'corr_right_start_time': None,
+                'corr_right_end_time': None,
                 'mean_force_auto': None,
                 'manual_start_time': None,
                 'manual_end_time': None,
                 'mean_force_manual': None,
 
-                # Processed signals snapshots
                 'corrected': None,
                 'filtered': None,
-                't_full_processed': None,
-
-                # Status
-                'drift_applied': False,
-                'filter_applied': False,
-                'auto_force_applied': False,
-                'manual_force_applied': False,
                 'last_error': None,
             }
-        return self.channel_file_state[key]
+        return self.state_map[key]
 
     def _get_active_processor(self):
         if not self.current_group or not self.current_channel:
@@ -360,10 +300,15 @@ class TDMSGuiApp:
     def _get_active_state(self):
         if not self.current_group or not self.current_channel or not self.current_file:
             return None
-        key = self._state_key(self.current_group, self.current_channel, self.current_file)
-        return self.channel_file_state.get(key)
+        return self.state_map.get(self._state_key(self.current_group, self.current_channel, self.current_file))
 
-    def _sync_ui_from_active_state(self):
+    def _channel_files(self, group_name, channel_name):
+        proc = self.processor_map.get(self._channel_key(group_name, channel_name))
+        if not proc:
+            return []
+        return sorted(proc.data.keys())
+
+    def _load_ui_from_active_state(self):
         state = self._get_active_state()
         if state is None:
             return
@@ -372,19 +317,18 @@ class TDMSGuiApp:
         self.noise_tol_var.set(str(state['noise_tolerance']))
         self.cutoff_var.set(str(state['cutoff_freq']))
         self.order_var.set(str(int(state['filter_order'])))
-
-        ch_state = self._ensure_channel_state(self.current_group, self.current_channel)
-        self.trigger_var.set(str(ch_state['trigger_threshold']))
-        self.margin_var.set(str(ch_state['margin_fraction']))
+        self.trigger_var.set(str(state['trigger_threshold']))
+        self.margin_var.set(str(state['margin_fraction']))
+        self.min_gap_var.set(str(state['min_gap_sec']))
+        self.min_cut_var.set(str(state['min_cut_time_sec']))
+        self.expand_var.set(str(state['expansion_time_sec']))
 
         self.selection_start = state['manual_start_time']
         self.selection_end = state['manual_end_time']
         self.sel_start_var.set("" if state['manual_start_time'] is None else f"{state['manual_start_time']:.6f}")
         self.sel_end_var.set("" if state['manual_end_time'] is None else f"{state['manual_end_time']:.6f}")
 
-        self._update_phase_controls()
-
-    def _save_ui_to_selected_states(self, target_files, include_manual=False):
+    def _save_ui_to_states(self, file_names, include_manual=False):
         if not self.current_group or not self.current_channel:
             return
 
@@ -392,10 +336,15 @@ class TDMSGuiApp:
         noise_tolerance = float(self.noise_tol_var.get())
         cutoff_freq = float(self.cutoff_var.get())
         filter_order = int(self.order_var.get())
+        trigger_threshold = float(self.trigger_var.get())
+        margin_fraction = float(self.margin_var.get())
+        min_gap_sec = float(self.min_gap_var.get())
+        min_cut_time_sec = float(self.min_cut_var.get())
+        expansion_time_sec = float(self.expand_var.get())
 
-        for file_name in target_files:
+        for file_name in file_names:
             key = self._state_key(self.current_group, self.current_channel, file_name)
-            state = self.channel_file_state.get(key)
+            state = self.state_map.get(key)
             if state is None:
                 continue
 
@@ -403,32 +352,16 @@ class TDMSGuiApp:
             state['noise_tolerance'] = noise_tolerance
             state['cutoff_freq'] = cutoff_freq
             state['filter_order'] = filter_order
+            state['trigger_threshold'] = trigger_threshold
+            state['margin_fraction'] = margin_fraction
+            state['min_gap_sec'] = min_gap_sec
+            state['min_cut_time_sec'] = min_cut_time_sec
+            state['expansion_time_sec'] = expansion_time_sec
             if include_manual:
                 state['manual_start_time'] = self.selection_start
                 state['manual_end_time'] = self.selection_end
 
-    def _save_ui_auto_channel_params(self):
-        if not self.current_group or not self.current_channel:
-            return
-
-        ch_state = self._ensure_channel_state(self.current_group, self.current_channel)
-        ch_state['trigger_threshold'] = float(self.trigger_var.get())
-        ch_state['margin_fraction'] = float(self.margin_var.get())
-
-        for file_name in self._get_channel_files(self.current_group, self.current_channel):
-            key = self._state_key(self.current_group, self.current_channel, file_name)
-            state = self.channel_file_state.get(key)
-            if state:
-                state['trigger_threshold'] = ch_state['trigger_threshold']
-                state['margin_fraction'] = ch_state['margin_fraction']
-
-    def _get_channel_files(self, group_name, channel_name):
-        proc = self.processor_map.get(self._channel_key(group_name, channel_name))
-        if not proc:
-            return []
-        return sorted(proc.data.keys())
-
-    # --------------------------- LOAD ALL DATA ---------------------------
+    # ----------------------------- LOAD DATA -----------------------------
     def _browse_file(self):
         path = filedialog.askopenfilename(filetypes=[("TDMS files", "*.tdms"), ("All files", "*.*")])
         if path:
@@ -439,11 +372,11 @@ class TDMSGuiApp:
         if path:
             self._set_source_path(path)
 
-    def _resolve_tdms_paths(self, source_path):
-        if os.path.isfile(source_path):
-            return [source_path]
-        if os.path.isdir(source_path):
-            return sorted(glob.glob(os.path.join(source_path, "*.tdms")))
+    def _resolve_tdms_paths(self, path):
+        if os.path.isfile(path):
+            return [path]
+        if os.path.isdir(path):
+            return sorted(glob.glob(os.path.join(path, "*.tdms")))
         return []
 
     def _discover_metadata(self, tdms_paths):
@@ -459,16 +392,14 @@ class TDMSGuiApp:
                 for ch in grp.channels():
                     channels_by_group[gname].add(ch.name)
 
-        channels_by_group = {g: sorted(list(chs)) for g, chs in channels_by_group.items()}
-        return sorted(list(groups)), channels_by_group
+        return sorted(list(groups)), {g: sorted(list(v)) for g, v in channels_by_group.items()}
 
     def _set_source_path(self, path):
         self.source_path = path
         self.path_var.set(path)
 
         self.processor_map = {}
-        self.channel_file_state = {}
-        self.channel_state = {}
+        self.state_map = {}
         self.selection_start = None
         self.selection_end = None
 
@@ -483,283 +414,223 @@ class TDMSGuiApp:
             groups, channels_by_group = self._discover_metadata(tdms_paths)
             self.channels_by_group = channels_by_group
 
-            # Load ALL group-channel data in AutomaticSignalProcessor instances (raw only)
-            load_count = 0
-            fail_count = 0
+            loaded = 0
+            failed = 0
             for group_name in groups:
                 for channel_name in channels_by_group.get(group_name, []):
                     try:
                         proc = AutomaticSignalProcessor(path=path, group_name=group_name, channel_name=channel_name)
                         self.processor_map[self._channel_key(group_name, channel_name)] = proc
-                        self._ensure_channel_state(group_name, channel_name)
-
-                        for file_name, file_data in proc.data.items():
-                            self._ensure_file_channel_state(group_name, channel_name, file_name, file_data)
-
-                        load_count += 1
+                        for fname, fdata in proc.data.items():
+                            self._ensure_state(group_name, channel_name, fname, fdata)
+                        loaded += 1
                     except Exception as exc:
-                        fail_count += 1
+                        failed += 1
                         self._log(f"Skip {group_name}/{channel_name}: {exc}")
+
+            self._log("Running automatic detection/process for all channels and files...")
+            self._auto_process_all_channels()
 
             self.group_combo['values'] = groups
             if groups:
                 self.group_var.set(groups[0])
                 self.current_group = groups[0]
-                self._update_channel_options()
+                self._on_group_changed()
 
             self._log(f"Loaded source: {path}")
-            self._log(f"Files: {len(tdms_paths)} | Groups: {len(groups)} | Group-channel streams loaded: {load_count} | Failed: {fail_count}")
+            self._log(f"Files={len(tdms_paths)} groups={len(groups)} streams loaded={loaded} failed={failed}")
+            self.refresh_plot()
         except Exception as exc:
-            messagebox.showerror("Metadata error", str(exc))
+            messagebox.showerror("Load error", str(exc))
 
-    def _update_channel_options(self):
-        group_name = self.group_var.get().strip()
-        self.current_group = group_name if group_name else None
+    def _auto_process_all_channels(self):
+        for (group_name, channel_name), proc in self.processor_map.items():
+            files = sorted(proc.data.keys())
+            self._process_files(group_name, channel_name, files)
 
-        channels = self.channels_by_group.get(group_name, [])
+    # ----------------------------- NAVIGATION -----------------------------
+    def _on_group_changed(self):
+        self.current_group = self.group_var.get().strip() or None
+        channels = self.channels_by_group.get(self.current_group, []) if self.current_group else []
         self.channel_combo['values'] = channels
 
         if channels:
             self.channel_var.set(channels[0])
-            self.current_channel = channels[0]
             self._on_channel_changed()
         else:
             self.channel_var.set("")
             self.current_channel = None
             self.refresh_plot()
 
-    def _on_group_changed(self):
-        self._update_channel_options()
-
     def _on_channel_changed(self):
         self.current_channel = self.channel_var.get().strip() or None
-
         if not self.current_group or not self.current_channel:
             self.refresh_plot()
             return
 
-        files = self._get_channel_files(self.current_group, self.current_channel)
-        self.file_combo['values'] = files
-        self.process_file_listbox.delete(0, tk.END)
-        for file_name in files:
-            self.process_file_listbox.insert(tk.END, file_name)
+        files = self._channel_files(self.current_group, self.current_channel)
 
+        self.active_file_combo['values'] = files
         if files:
             self.current_file = files[0]
-            self.file_var.set(files[0])
+            self.active_file_var.set(files[0])
         else:
             self.current_file = None
-            self.file_var.set("")
+            self.active_file_var.set("")
 
-        self._sync_ui_from_active_state()
+        self.view_files_listbox.delete(0, tk.END)
+        for fname in files:
+            self.view_files_listbox.insert(tk.END, fname)
+
+        if files:
+            self.view_files_listbox.selection_set(0)
+
+        self._load_ui_from_active_state()
         self.refresh_plot()
 
-    def _on_file_changed(self):
-        prev = self.current_file
-        if prev and self.current_group and self.current_channel:
-            self._save_ui_to_selected_states([prev], include_manual=True)
-
-        self.current_file = self.file_var.get().strip() or None
-        self._sync_ui_from_active_state()
+    def _on_active_file_changed(self):
+        self.current_file = self.active_file_var.get().strip() or None
+        self._load_ui_from_active_state()
         self.refresh_plot()
 
-    # --------------------------- PHASE CONTROL ---------------------------
-    def _update_phase_controls(self):
-        if not self.current_group or not self.current_channel:
+    def _on_view_files_changed(self):
+        sel = self._get_view_files()
+        if sel:
+            # Keep the first viewed file as active if active file is outside selection
+            if self.current_file not in sel:
+                self.current_file = sel[0]
+                self.active_file_var.set(sel[0])
+                self._load_ui_from_active_state()
+        self.refresh_plot()
+
+    def _select_all_view_files(self):
+        count = self.view_files_listbox.size()
+        if count == 0:
             return
+        self.view_files_listbox.selection_set(0, count - 1)
+        self._on_view_files_changed()
 
-        ch_state = self._ensure_channel_state(self.current_group, self.current_channel)
-        auto_done = ch_state['auto_pipeline_done']
+    def _clear_view_files_selection(self):
+        self.view_files_listbox.selection_clear(0, tk.END)
+        self.refresh_plot()
 
-        if auto_done:
-            self.trigger_entry.configure(state='disabled')
-            self.margin_entry.configure(state='disabled')
-            self.btn_auto_compute.configure(state='disabled')
-            if not self.chk_corrected.winfo_ismapped():
-                self.chk_corrected.pack(side=tk.LEFT, padx=(0, 8))
-            if not self.chk_filtered.winfo_ismapped():
-                self.chk_filtered.pack(side=tk.LEFT, padx=(0, 8))
-        else:
-            self.trigger_entry.configure(state='normal')
-            self.margin_entry.configure(state='normal')
-            self.btn_auto_compute.configure(state='normal')
-            if self.chk_corrected.winfo_ismapped():
-                self.chk_corrected.pack_forget()
-            if self.chk_filtered.winfo_ismapped():
-                self.chk_filtered.pack_forget()
-            self.show_corrected_var.set(False)
-            self.show_filtered_var.set(False)
-            self.show_raw_var.set(True)
-
-    # --------------------------- PROCESSING ---------------------------
-    def _get_target_files(self):
-        if self.process_all_var.get() and self.current_group and self.current_channel:
-            return self._get_channel_files(self.current_group, self.current_channel)
-
-        idxs = list(self.process_file_listbox.curselection())
+    def _get_view_files(self):
+        idxs = list(self.view_files_listbox.curselection())
         if idxs:
-            return [self.process_file_listbox.get(i) for i in idxs]
-
+            return [self.view_files_listbox.get(i) for i in idxs]
         if self.current_file:
             return [self.current_file]
-
         return []
 
-    def _apply_drift(self):
-        proc = self._get_active_processor()
+    # ----------------------------- PROCESSING -----------------------------
+    def _process_files(self, group_name, channel_name, file_names):
+        proc = self.processor_map.get(self._channel_key(group_name, channel_name))
         if proc is None:
             return
 
-        try:
-            target_files = self._get_target_files()
-            self._save_ui_to_selected_states(target_files)
+        for fname in file_names:
+            key = self._state_key(group_name, channel_name, fname)
+            state = self.state_map.get(key)
+            if state is None:
+                continue
 
-            for file_name in target_files:
-                state = self.channel_file_state[self._state_key(self.current_group, self.current_channel, file_name)]
+            try:
+                proc.detect_cutting_intervals_on_raw(
+                    trigger_threshold=state['trigger_threshold'],
+                    margin_fraction=state['margin_fraction'],
+                    min_gap_sec=state['min_gap_sec'],
+                    min_cut_time_sec=state['min_cut_time_sec'],
+                    expansion_time_sec=state['expansion_time_sec'],
+                    correction_window_time=state['window_time'],
+                    target_files=[fname],
+                )
+
                 proc.drift_offset_correction(
                     window_time=state['window_time'],
                     noise_tolerance=state['noise_tolerance'],
-                    target_files=[file_name],
+                    target_files=[fname],
+                    use_detected_regions=True,
                 )
-                state['drift_applied'] = 'corrected' in proc.data[file_name]
-                state['corrected'] = proc.data[file_name].get('corrected').copy() if 'corrected' in proc.data[file_name] else None
-                state['t_full_processed'] = proc.data[file_name]['t_full'].copy()
 
-            self._log(f"Drift correction applied to {len(target_files)} file(s).")
-            self.refresh_plot()
-        except Exception as exc:
-            messagebox.showerror("Drift correction error", str(exc))
-
-    def _apply_filter(self):
-        proc = self._get_active_processor()
-        if proc is None:
-            return
-
-        try:
-            target_files = self._get_target_files()
-            self._save_ui_to_selected_states(target_files)
-
-            for file_name in target_files:
-                state = self.channel_file_state[self._state_key(self.current_group, self.current_channel, file_name)]
                 proc.apply_lowpass_filter(
                     cutoff_freq=state['cutoff_freq'],
                     order=state['filter_order'],
-                    target_files=[file_name],
+                    target_files=[fname],
                 )
-                state['filter_applied'] = 'filtered' in proc.data[file_name]
-                state['filtered'] = proc.data[file_name].get('filtered').copy() if 'filtered' in proc.data[file_name] else None
-                state['t_full_processed'] = proc.data[file_name]['t_full'].copy()
 
-            self._log(f"Lowpass filter applied to {len(target_files)} file(s).")
-            self.refresh_plot()
-        except Exception as exc:
-            messagebox.showerror("Filter error", str(exc))
+                proc.compute_average_cutting_force(
+                    use_filtered=True,
+                    target_files=[fname],
+                    prefer_existing_interval=True,
+                )
 
-    def _auto_compute_force(self):
-        proc = self._get_active_processor()
-        if proc is None:
-            return
+                fdata = proc.data[fname]
+                state['corrected'] = fdata.get('corrected').copy() if 'corrected' in fdata else None
+                state['filtered'] = fdata.get('filtered').copy() if 'filtered' in fdata else None
 
-        try:
-            ch_state = self._ensure_channel_state(self.current_group, self.current_channel)
-            ch_state['trigger_threshold'] = float(self.trigger_var.get())
-            ch_state['margin_fraction'] = float(self.margin_var.get())
-
-            target_files = self._get_target_files()
-            for file_name in target_files:
-                state = self.channel_file_state[self._state_key(self.current_group, self.current_channel, file_name)]
-                state['trigger_threshold'] = ch_state['trigger_threshold']
-                state['margin_fraction'] = ch_state['margin_fraction']
-
-            proc.compute_average_cutting_force(
-                trigger_threshold=ch_state['trigger_threshold'],
-                margin_fraction=ch_state['margin_fraction'],
-                target_files=target_files,
-            )
-
-            for file_name in target_files:
-                fdata = proc.data[file_name]
-                state = self.channel_file_state[self._state_key(self.current_group, self.current_channel, file_name)]
-                state['auto_force_applied'] = True
-                state['mean_force_auto'] = fdata.get('mean_force')
                 state['tri_start_time'] = fdata.get('tri_start_time')
                 state['tri_end_time'] = fdata.get('tri_end_time')
                 state['steady_start_time'] = fdata.get('steady_start_time')
                 state['steady_end_time'] = fdata.get('steady_end_time')
+                state['expanded_start_time'] = fdata.get('expanded_start_time')
+                state['expanded_end_time'] = fdata.get('expanded_end_time')
+                state['corr_left_start_time'] = fdata.get('corr_left_start_time')
+                state['corr_left_end_time'] = fdata.get('corr_left_end_time')
+                state['corr_right_start_time'] = fdata.get('corr_right_start_time')
+                state['corr_right_end_time'] = fdata.get('corr_right_end_time')
+                state['mean_force_auto'] = fdata.get('mean_force')
+                state['last_error'] = None
+            except Exception as exc:
+                state['last_error'] = str(exc)
 
-            self._log(f"Auto mean force computed for {len(target_files)} file(s).")
-            self.refresh_plot()
-        except Exception as exc:
-            messagebox.showerror("Auto force error", str(exc))
+    def _apply_params_to_viewed_files(self):
+        if not self.current_group or not self.current_channel:
+            return
 
-    def _run_automatic_pipeline(self):
-        proc = self._get_active_processor()
-        if proc is None:
+        files = self._get_view_files()
+        if not files:
+            messagebox.showwarning("No files", "Select one or more files to process.")
             return
 
         try:
-            all_files = self._get_channel_files(self.current_group, self.current_channel)
-            self._save_ui_to_selected_states(all_files)
-            self._save_ui_auto_channel_params()
-
-            ch_state = self._ensure_channel_state(self.current_group, self.current_channel)
-
-            self._log("Running automatic pipeline: drift -> lowpass -> auto force...")
-            for file_name in all_files:
-                state = self.channel_file_state[self._state_key(self.current_group, self.current_channel, file_name)]
-                try:
-                    proc.drift_offset_correction(
-                        window_time=state['window_time'],
-                        noise_tolerance=state['noise_tolerance'],
-                        target_files=[file_name],
-                    )
-                    state['drift_applied'] = 'corrected' in proc.data[file_name]
-                    state['corrected'] = proc.data[file_name].get('corrected').copy() if 'corrected' in proc.data[file_name] else None
-
-                    proc.apply_lowpass_filter(
-                        cutoff_freq=state['cutoff_freq'],
-                        order=state['filter_order'],
-                        target_files=[file_name],
-                    )
-                    state['filter_applied'] = 'filtered' in proc.data[file_name]
-                    state['filtered'] = proc.data[file_name].get('filtered').copy() if 'filtered' in proc.data[file_name] else None
-
-                    proc.compute_average_cutting_force(
-                        trigger_threshold=ch_state['trigger_threshold'],
-                        margin_fraction=ch_state['margin_fraction'],
-                        target_files=[file_name],
-                    )
-
-                    fdata = proc.data[file_name]
-                    state['auto_force_applied'] = True
-                    state['mean_force_auto'] = fdata.get('mean_force')
-                    state['tri_start_time'] = fdata.get('tri_start_time')
-                    state['tri_end_time'] = fdata.get('tri_end_time')
-                    state['steady_start_time'] = fdata.get('steady_start_time')
-                    state['steady_end_time'] = fdata.get('steady_end_time')
-                    state['t_full_processed'] = fdata.get('t_full').copy() if 't_full' in fdata else None
-                    state['last_error'] = None
-                except Exception as per_file_exc:
-                    state['last_error'] = str(per_file_exc)
-                    self._log(f"  {file_name}: pipeline failed -> {per_file_exc}")
-
-            ch_state['auto_pipeline_done'] = True
-            self._update_phase_controls()
-            self._log("Automatic pipeline complete for current channel.")
+            self._save_ui_to_states(files)
+            self._process_files(self.current_group, self.current_channel, files)
+            self._log(f"Applied parameters and recalculated {len(files)} viewed file(s).")
             self.refresh_plot()
         except Exception as exc:
-            messagebox.showerror("Pipeline error", str(exc))
+            messagebox.showerror("Apply error", str(exc))
 
-    # --------------------------- REGION / MANUAL ---------------------------
+    # ----------------------------- REGION TOOLS -----------------------------
+    def _set_span_selector(self, ax):
+        if self.span_selector is not None:
+            try:
+                self.span_selector.set_active(False)
+            except Exception:
+                pass
+            self.span_selector = None
+
+        if ax is not None:
+            self.span_selector = SpanSelector(
+                ax,
+                self._on_region_selected,
+                'horizontal',
+                useblit=True,
+                interactive=True,
+                drag_from_anywhere=True,
+                props=dict(alpha=0.2, facecolor='tab:green'),
+            )
+
     def _on_region_selected(self, xmin, xmax):
+        if not self.current_file:
+            return
+
         self.selection_start = float(min(xmin, xmax))
         self.selection_end = float(max(xmin, xmax))
+
         self.sel_start_var.set(f"{self.selection_start:.6f}")
         self.sel_end_var.set(f"{self.selection_end:.6f}")
 
-        if self.current_file:
-            self._save_ui_to_selected_states([self.current_file], include_manual=True)
-
+        self._save_ui_to_states([self.current_file], include_manual=True)
         self._manual_compute_force()
 
     def _apply_entry_range(self):
@@ -772,19 +643,17 @@ class TDMSGuiApp:
             self.selection_start = start
             self.selection_end = end
             if self.current_file:
-                self._save_ui_to_selected_states([self.current_file], include_manual=True)
-
+                self._save_ui_to_states([self.current_file], include_manual=True)
             self._manual_compute_force()
         except Exception as exc:
             messagebox.showerror("Invalid range", str(exc))
 
     def _manual_compute_force(self):
         proc = self._get_active_processor()
-        if proc is None:
+        state = self._get_active_state()
+        if proc is None or state is None or not self.current_file:
             return
         if self.selection_start is None or self.selection_end is None:
-            return
-        if not self.current_file:
             return
 
         try:
@@ -794,35 +663,28 @@ class TDMSGuiApp:
                 target_files=[self.current_file],
                 use_filtered=True,
             )
-            mean_val = result.get(self.current_file)
-
-            state = self._get_active_state()
-            if state is not None:
-                state['manual_start_time'] = self.selection_start
-                state['manual_end_time'] = self.selection_end
-                state['manual_force_applied'] = True
-                state['mean_force_manual'] = mean_val
-
-            self._log(f"Manual mean force | {self.current_file}: {mean_val:.4f}")
+            value = result.get(self.current_file)
+            state['manual_start_time'] = self.selection_start
+            state['manual_end_time'] = self.selection_end
+            state['mean_force_manual'] = value
+            self._log(f"Manual mean force | {self.current_file}: {value:.4f}")
             self.refresh_plot()
         except Exception as exc:
             messagebox.showerror("Manual force error", str(exc))
 
     def _zero_selected_region(self):
         proc = self._get_active_processor()
-        if proc is None:
+        if proc is None or not self.current_file:
             return
-        if self.selection_start is None or self.selection_end is None or not self.current_file:
-            messagebox.showwarning("No selection", "Select a region in the chart first.")
+        if self.selection_start is None or self.selection_end is None:
+            messagebox.showwarning("No selection", "Select a region first.")
             return
 
         try:
             proc.zero_out_time_span(self.selection_start, self.selection_end, target_files=[self.current_file])
-
             state = self._get_active_state()
             if state is not None and 'filtered' in proc.data[self.current_file]:
                 state['filtered'] = proc.data[self.current_file]['filtered'].copy()
-
             self._log(f"Zeroed filtered signal in [{self.selection_start:.4f}, {self.selection_end:.4f}] s")
             self.refresh_plot()
         except Exception as exc:
@@ -830,15 +692,15 @@ class TDMSGuiApp:
 
     def _remove_selected_region(self):
         proc = self._get_active_processor()
-        if proc is None:
+        if proc is None or not self.current_file:
             return
-        if self.selection_start is None or self.selection_end is None or not self.current_file:
-            messagebox.showwarning("No selection", "Select a region in the chart first.")
+        if self.selection_start is None or self.selection_end is None:
+            messagebox.showwarning("No selection", "Select a region first.")
             return
 
         try:
             proc.remove_time_span(self.selection_start, self.selection_end, target_files=[self.current_file])
-            self._refresh_state_from_processor_file(self.current_file)
+            self._sync_state_from_processor_file(self.current_file)
             self._log(f"Removed signal span [{self.selection_start:.4f}, {self.selection_end:.4f}] s")
             self.refresh_plot()
         except Exception as exc:
@@ -846,36 +708,33 @@ class TDMSGuiApp:
 
     def _keep_only_selected_region(self):
         proc = self._get_active_processor()
-        if proc is None:
+        if proc is None or not self.current_file:
             return
-        if self.selection_start is None or self.selection_end is None or not self.current_file:
-            messagebox.showwarning("No selection", "Select a region in the chart first.")
+        if self.selection_start is None or self.selection_end is None:
+            messagebox.showwarning("No selection", "Select a region first.")
             return
 
         try:
             proc.keep_only_time_span(self.selection_start, self.selection_end, target_files=[self.current_file])
-            self._refresh_state_from_processor_file(self.current_file)
+            self._sync_state_from_processor_file(self.current_file)
             self._log(f"Kept only span [{self.selection_start:.4f}, {self.selection_end:.4f}] s")
             self.refresh_plot()
         except Exception as exc:
             messagebox.showerror("Keep-only span error", str(exc))
 
-    def _refresh_state_from_processor_file(self, file_name):
+    def _sync_state_from_processor_file(self, file_name):
         proc = self._get_active_processor()
         state = self._get_active_state()
         if proc is None or state is None or file_name not in proc.data:
             return
 
         fdata = proc.data[file_name]
-        state['fs'] = fdata['fs']
-        state['ts'] = fdata['ts']
         state['raw'] = fdata['raw'].copy()
-        state['t_full_raw'] = fdata['t_full'].copy()
+        state['t_full'] = fdata['t_full'].copy()
         state['corrected'] = fdata.get('corrected').copy() if 'corrected' in fdata else None
         state['filtered'] = fdata.get('filtered').copy() if 'filtered' in fdata else None
-        state['t_full_processed'] = fdata['t_full'].copy()
 
-    # --------------------------- EXPORT CSV ---------------------------
+    # ----------------------------- EXPORT -----------------------------
     def _export_force_csv(self):
         if not self.source_path:
             messagebox.showwarning("Missing source", "Load source data first.")
@@ -889,9 +748,9 @@ class TDMSGuiApp:
         channels = self.channels_by_group.get(group_name, [])
         canonical = {'fx': None, 'fy': None, 'fz': None}
         for ch in channels:
-            cl = ch.strip().lower()
-            if cl in canonical and canonical[cl] is None:
-                canonical[cl] = ch
+            lc = ch.strip().lower()
+            if lc in canonical and canonical[lc] is None:
+                canonical[lc] = ch
 
         if not all(canonical.values()):
             messagebox.showerror("Missing channels", "Could not map Fx/Fy/Fz channels in selected group.")
@@ -911,117 +770,142 @@ class TDMSGuiApp:
         try:
             for axis in ('fx', 'fy', 'fz'):
                 channel_name = canonical[axis]
-                proc = self.processor_map.get(self._channel_key(group_name, channel_name))
-                if proc is None:
-                    proc = AutomaticSignalProcessor(path=self.source_path, group_name=group_name, channel_name=channel_name)
-
-                ch_state = self._ensure_channel_state(group_name, channel_name)
-
-                for file_name in sorted(proc.data.keys()):
-                    key = self._state_key(group_name, channel_name, file_name)
-                    state = self.channel_file_state.get(key)
+                for fname in files:
+                    key = self._state_key(group_name, channel_name, fname)
+                    state = self.state_map.get(key)
                     if state is None:
-                        state = self._ensure_file_channel_state(group_name, channel_name, file_name, proc.data[file_name])
+                        continue
 
-                    value = state.get('mean_force_manual') if state.get('manual_force_applied') else state.get('mean_force_auto')
-
-                    if value is None:
-                        # Fallback run for missing result
-                        proc.drift_offset_correction(
-                            window_time=state['window_time'],
-                            noise_tolerance=state['noise_tolerance'],
-                            target_files=[file_name],
-                        )
-                        proc.apply_lowpass_filter(
-                            cutoff_freq=state['cutoff_freq'],
-                            order=state['filter_order'],
-                            target_files=[file_name],
-                        )
-                        proc.compute_average_cutting_force(
-                            trigger_threshold=ch_state['trigger_threshold'],
-                            margin_fraction=ch_state['margin_fraction'],
-                            target_files=[file_name],
-                        )
-                        value = proc.data[file_name].get('mean_force')
-
-                    rows[file_name][axis] = '' if value is None else f"{value:.4f}"
+                    val = state['mean_force_manual'] if state['mean_force_manual'] is not None else state['mean_force_auto']
+                    rows[fname][axis] = '' if val is None else f"{val:.4f}"
 
             with open(save_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(['file', 'fx', 'fy', 'fz'])
-                for file_name in files:
-                    writer.writerow([file_name, rows[file_name]['fx'], rows[file_name]['fy'], rows[file_name]['fz']])
+                for fname in files:
+                    writer.writerow([fname, rows[fname]['fx'], rows[fname]['fy'], rows[fname]['fz']])
 
             self._log(f"CSV exported: {save_path}")
         except Exception as exc:
             messagebox.showerror("CSV export error", str(exc))
 
-    # --------------------------- PLOT ---------------------------
-    def refresh_plot(self):
-        self.ax.clear()
-        self.ax.set_xlabel("Time (s)")
-        self.ax.set_ylabel("Amplitude")
-        self.ax.grid(True, linestyle="--", alpha=0.4)
+    # ----------------------------- PLOT -----------------------------
+    def _grid_shape(self, n):
+        if n <= 0:
+            return 1, 1
+        if n <= 9:
+            cols = int(math.ceil(math.sqrt(n)))
+            rows = int(math.ceil(n / cols))
+            return rows, cols
+        cols = 3
+        rows = int(math.ceil(n / cols))
+        return rows, cols
 
-        state = self._get_active_state()
+    def refresh_plot(self):
+        self.figure.clear()
+
         proc = self._get_active_processor()
-        if state is None or proc is None or self.current_file not in proc.data:
-            self.ax.set_title("Load data, choose group/channel/file")
+        files = self._get_view_files()
+
+        if proc is None or not files:
+            ax = self.figure.add_subplot(111)
+            ax.set_title("Load data, choose group/channel/files")
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Amplitude")
+            ax.grid(True, linestyle='--', alpha=0.4)
+            self._set_span_selector(None)
             self.canvas.draw_idle()
             return
 
-        file_data = proc.data[self.current_file]
-        t = file_data['t_full']
+        rows, cols = self._grid_shape(len(files))
+        axes = self.figure.subplots(rows, cols)
+        if hasattr(axes, 'flatten'):
+            axes = axes.flatten()
+        elif not isinstance(axes, (list, tuple)):
+            axes = [axes]
 
-        ch_state = self._ensure_channel_state(self.current_group, self.current_channel)
-        self._update_phase_controls()
+        for ax, fname in zip(axes, files):
+            fdata = proc.data.get(fname)
+            state = self.state_map.get(self._state_key(self.current_group, self.current_channel, fname))
+            if fdata is None or state is None:
+                ax.set_visible(False)
+                continue
 
-        plotted = False
+            t = fdata['t_full']
 
-        if self.show_raw_var.get() and 'raw' in file_data:
-            self.ax.plot(t, file_data['raw'], color='tab:gray', linewidth=1.0, label='raw')
-            plotted = True
-
-        if ch_state['auto_pipeline_done']:
-            if self.show_corrected_var.get() and 'corrected' in file_data:
-                self.ax.plot(t, file_data['corrected'], color='tab:orange', linewidth=1.0, label='corrected')
+            plotted = False
+            if self.show_raw_var.get() and 'raw' in fdata:
+                ax.plot(t, fdata['raw'], color='tab:gray', linewidth=0.9, label='raw')
                 plotted = True
-
-            if self.show_filtered_var.get() and 'filtered' in file_data:
-                self.ax.plot(t, file_data['filtered'], color='tab:blue', linewidth=1.0, label='filtered')
+            if self.show_corrected_var.get() and 'corrected' in fdata:
+                ax.plot(t, fdata['corrected'], color='tab:orange', linewidth=0.9, label='corrected')
                 plotted = True
+            if self.show_filtered_var.get() and 'filtered' in fdata:
+                ax.plot(t, fdata['filtered'], color='tab:blue', linewidth=0.9, label='filtered')
+                plotted = True
+            if not plotted and 'raw' in fdata:
+                ax.plot(t, fdata['raw'], color='tab:gray', linewidth=0.9, label='raw')
 
-        if not plotted and 'raw' in file_data:
-            self.ax.plot(t, file_data['raw'], color='tab:gray', linewidth=1.0, label='raw')
+            # Detection regions
+            if state['tri_start_time'] is not None and state['tri_end_time'] is not None:
+                ax.axvspan(state['tri_start_time'], state['tri_end_time'], color='gray', alpha=0.12, label='trigger')
+            if state['steady_start_time'] is not None and state['steady_end_time'] is not None:
+                ax.axvspan(state['steady_start_time'], state['steady_end_time'], color='tab:green', alpha=0.18, label='steady')
+            if state['corr_left_start_time'] is not None and state['corr_left_end_time'] is not None:
+                ax.axvspan(state['corr_left_start_time'], state['corr_left_end_time'], color='gold', alpha=0.18, label='corr start')
+            if state['corr_right_start_time'] is not None and state['corr_right_end_time'] is not None:
+                ax.axvspan(state['corr_right_start_time'], state['corr_right_end_time'], color='gold', alpha=0.18, label='corr end')
 
-        # Simpler interval view: manual takes priority over auto
-        if state.get('manual_force_applied') and state.get('manual_start_time') is not None and state.get('manual_end_time') is not None:
-            ss = state['manual_start_time']
-            se = state['manual_end_time']
-            mf = state.get('mean_force_manual')
-            self.ax.axvspan(ss, se, color='tab:purple', alpha=0.20, label='manual region')
-            if mf is not None:
-                self.ax.plot([ss, se], [mf, mf], color='tab:purple', linestyle='--', linewidth=2, label=f"manual mean: {mf:.3f}")
-        elif state.get('auto_force_applied') and state.get('steady_start_time') is not None and state.get('steady_end_time') is not None:
-            ss = state['steady_start_time']
-            se = state['steady_end_time']
-            mf = state.get('mean_force_auto')
-            self.ax.axvspan(ss, se, color='tab:green', alpha=0.20, label='auto steady')
-            if mf is not None:
-                self.ax.plot([ss, se], [mf, mf], 'r--', linewidth=2, label=f"auto mean: {mf:.3f}")
+            if state['mean_force_manual'] is not None and state['manual_start_time'] is not None and state['manual_end_time'] is not None:
+                ax.axvspan(state['manual_start_time'], state['manual_end_time'], color='tab:purple', alpha=0.16, label='manual')
+                ax.plot(
+                    [state['manual_start_time'], state['manual_end_time']],
+                    [state['mean_force_manual'], state['mean_force_manual']],
+                    color='tab:purple',
+                    linestyle='--',
+                    linewidth=1.8,
+                    label=f"manual mean: {state['mean_force_manual']:.2f}",
+                )
+            elif state['mean_force_auto'] is not None and state['steady_start_time'] is not None and state['steady_end_time'] is not None:
+                ax.plot(
+                    [state['steady_start_time'], state['steady_end_time']],
+                    [state['mean_force_auto'], state['mean_force_auto']],
+                    color='red',
+                    linestyle='--',
+                    linewidth=1.8,
+                    label=f"auto mean: {state['mean_force_auto']:.2f}",
+                )
 
-        title = (
-            f"File: {self.current_file} | Group: {self.current_group} | Channel: {self.current_channel}"
-            f"\nwindow={state['window_time']:.3f}s noise={state['noise_tolerance']:.3f} "
-            f"cutoff={state['cutoff_freq']:.3f}Hz order={int(state['filter_order'])} "
-            f"trigger={state['trigger_threshold']:.3f} margin={state['margin_fraction']:.3f}"
+            ax.set_title(fname, fontsize=9)
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Amplitude")
+            ax.grid(True, linestyle='--', alpha=0.4)
+            ax.legend(loc='upper right', fontsize='x-small')
+
+        for ax in axes[len(files):]:
+            ax.set_visible(False)
+
+        # Span selector only in single-file view
+        if len(files) == 1:
+            self._set_span_selector(axes[0])
+        else:
+            self._set_span_selector(None)
+
+        # Keep active file synced with first viewed file
+        if files and self.current_file not in files:
+            self.current_file = files[0]
+            self.active_file_var.set(files[0])
+            self._load_ui_from_active_state()
+
+        self.figure.suptitle(
+            f"Group: {self.current_group} | Channel: {self.current_channel} | Viewed files: {len(files)}",
+            fontsize=11,
+            fontweight='bold',
         )
-        self.ax.set_title(title)
-        self.ax.legend(loc='upper right')
-        self.figure.tight_layout()
+        self.figure.tight_layout(rect=[0, 0.01, 1, 0.97])
         self.canvas.draw_idle()
 
-    # --------------------------- LOG ---------------------------
+    # ----------------------------- LOG -----------------------------
     def _log(self, message):
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)

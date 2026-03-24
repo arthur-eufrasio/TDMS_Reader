@@ -136,7 +136,11 @@ class AutomaticSignalProcessor:
         fs_val = 1 / ts_val
         return data, fs_val, ts_val
     
-    def drift_offset_correction(self, window_time=0.3, noise_tolerance=5.0, target_files=None):
+    def drift_offset_correction(self,
+                                window_time=0.3,
+                                noise_tolerance=5.0,
+                                target_files=None,
+                                use_detected_regions=True):
         """
         Removes linear drift and DC offset from the raw signals across all files.
         
@@ -160,9 +164,26 @@ class AutomaticSignalProcessor:
             raw_data = file_data['raw']
             fs = file_data['fs']
             window = int(window_time * fs)
-            
-            start_window = raw_data[:window]
-            end_window = raw_data[-window:]
+
+            if window < 2:
+                raise RuntimeError(f"[{filename}] window_time={window_time} is too small for fs={fs:.3f}.")
+
+            if use_detected_regions and 'corr_left_start_idx' in file_data and 'corr_right_end_idx' in file_data:
+                left_start = file_data['corr_left_start_idx']
+                left_end = file_data['corr_left_end_idx']
+                right_start = file_data['corr_right_start_idx']
+                right_end = file_data['corr_right_end_idx']
+            else:
+                left_start = 0
+                left_end = window
+                right_start = max(0, len(raw_data) - window)
+                right_end = len(raw_data)
+
+            if left_end <= left_start or right_end <= right_start:
+                raise RuntimeError(f"[{filename}] Invalid correction windows.")
+
+            start_window = raw_data[left_start:left_end]
+            end_window = raw_data[right_start:right_end]
             
             start_variation = np.max(start_window) - np.min(start_window)
             end_variation = np.max(end_window) - np.min(end_window)
@@ -174,22 +195,25 @@ class AutomaticSignalProcessor:
                     f"(Tolerance is {noise_tolerance})."
                 )
 
-            corrected = raw_data.copy()
-            
-            y1 = np.mean(corrected[:window])
-            y2 = np.mean(corrected[-window:])
-            
-            dy = y2 - y1
-            dx = len(corrected) - 1
-            dy_incr = dy / dx
+            y1 = np.mean(start_window)
+            y2 = np.mean(end_window)
 
-            indices = np.arange(len(corrected))
-            corrected -= indices * dy_incr
+            x1 = 0.5 * (left_start + left_end - 1)
+            x2 = 0.5 * (right_start + right_end - 1)
+            if x2 <= x1:
+                raise RuntimeError(f"[{filename}] Invalid correction anchor points.")
 
-            offset = (np.mean(corrected[:window]) + np.mean(corrected[-window:])) / 2
+            indices = np.arange(len(raw_data))
+            slope = (y2 - y1) / (x2 - x1)
+            trend = y1 + slope * (indices - x1)
+
+            corrected = raw_data - trend
+
+            offset = (np.mean(corrected[left_start:left_end]) + np.mean(corrected[right_start:right_end])) / 2
             corrected -= offset
 
             self.data[filename]['corrected'] = corrected
+            self.data[filename]['correction_window_time'] = window_time
             
     def apply_lowpass_filter(self, cutoff_freq=250, order=5, target_files=None):
         """
@@ -360,7 +384,16 @@ class AutomaticSignalProcessor:
 
             self._rebuild_time_axis(file_data)
 
-    def _detect_cutting_interval(self, signal, t_full, trigger_threshold, margin_fraction, filename, min_gap_sec=1.0):
+    def _detect_cutting_interval(self,
+                                 signal,
+                                 t_full,
+                                 trigger_threshold,
+                                 margin_fraction,
+                                 filename,
+                                 min_gap_sec=1.0,
+                                 min_cut_time_sec=0.0,
+                                 expansion_time_sec=0.0,
+                                 correction_window_time=0.3):
         """
         Auxiliary method to find the indices and times of the FIRST active cutting interval
         and its steady-state segment, ignoring any subsequent cuts in the same file.
@@ -385,18 +418,40 @@ class AutomaticSignalProcessor:
                 f"[{filename}] No cutting interval found with trigger_threshold={trigger_threshold}."
             )
             
+        if len(t_full) < 2:
+            raise RuntimeError(f"[{filename}] Signal is too short for interval detection.")
+
         fs = 1.0 / (t_full[1] - t_full[0])
         min_gap_samples = int(min_gap_sec * fs)
+        min_cut_samples = max(1, int(min_cut_time_sec * fs))
+        expansion_samples = int(expansion_time_sec * fs)
+        corr_window_samples = max(2, int(correction_window_time * fs))
         
         gaps = np.where(np.diff(active_idx) > min_gap_samples)[0]
-        
-        tri_start_idx = int(active_idx[0])
-        
-        if gaps.size > 0:
-            first_cut_end_idx_in_active = gaps[0]
-            tri_end_idx = int(active_idx[first_cut_end_idx_in_active])
-        else:
-            tri_end_idx = int(active_idx[-1])
+
+        cut_ranges = []
+        seg_start_pos = 0
+        for gap_pos in gaps:
+            seg_end_pos = gap_pos
+            s_idx = int(active_idx[seg_start_pos])
+            e_idx = int(active_idx[seg_end_pos])
+            cut_ranges.append((s_idx, e_idx))
+            seg_start_pos = gap_pos + 1
+
+        cut_ranges.append((int(active_idx[seg_start_pos]), int(active_idx[-1])))
+
+        tri_start_idx = None
+        tri_end_idx = None
+        for s_idx, e_idx in cut_ranges:
+            if (e_idx - s_idx + 1) >= min_cut_samples:
+                tri_start_idx = s_idx
+                tri_end_idx = e_idx
+                break
+
+        if tri_start_idx is None:
+            raise RuntimeError(
+                f"[{filename}] No cutting interval found with minimum cut time {min_cut_time_sec}s."
+            )
 
         cut_len = tri_end_idx - tri_start_idx + 1
         margin = int(margin_fraction * cut_len)
@@ -409,6 +464,19 @@ class AutomaticSignalProcessor:
                 f"[{filename}] The first cut is too short for margin_fraction={margin_fraction:.2f}."
             )
 
+        expanded_start_idx = max(0, tri_start_idx - expansion_samples)
+        expanded_end_idx = min(len(signal) - 1, tri_end_idx + expansion_samples)
+
+        if (expanded_end_idx - expanded_start_idx + 1) < 2 * corr_window_samples:
+            raise RuntimeError(
+                f"[{filename}] Expanded interval is too short for correction_window_time={correction_window_time}s."
+            )
+
+        corr_left_start_idx = expanded_start_idx
+        corr_left_end_idx = expanded_start_idx + corr_window_samples
+        corr_right_end_idx = expanded_end_idx + 1
+        corr_right_start_idx = corr_right_end_idx - corr_window_samples
+
         return {
             'tri_start_idx': tri_start_idx,
             'tri_end_idx': tri_end_idx,
@@ -417,14 +485,69 @@ class AutomaticSignalProcessor:
             'tri_start_time': float(t_full[tri_start_idx]),
             'tri_end_time': float(t_full[tri_end_idx]),
             'steady_start_time': float(t_full[steady_start_idx]),
-            'steady_end_time': float(t_full[steady_end_idx])
+            'steady_end_time': float(t_full[steady_end_idx]),
+            'expanded_start_idx': expanded_start_idx,
+            'expanded_end_idx': expanded_end_idx,
+            'expanded_start_time': float(t_full[expanded_start_idx]),
+            'expanded_end_time': float(t_full[expanded_end_idx]),
+            'corr_left_start_idx': corr_left_start_idx,
+            'corr_left_end_idx': corr_left_end_idx,
+            'corr_right_start_idx': corr_right_start_idx,
+            'corr_right_end_idx': corr_right_end_idx,
+            'corr_left_start_time': float(t_full[corr_left_start_idx]),
+            'corr_left_end_time': float(t_full[corr_left_end_idx - 1]),
+            'corr_right_start_time': float(t_full[corr_right_start_idx]),
+            'corr_right_end_time': float(t_full[corr_right_end_idx - 1]),
+            'min_gap_sec': float(min_gap_sec),
+            'min_cut_time_sec': float(min_cut_time_sec),
+            'expansion_time_sec': float(expansion_time_sec),
+            'correction_window_time': float(correction_window_time),
         }
+
+    def detect_cutting_intervals_on_raw(self,
+                                        trigger_threshold=20.0,
+                                        margin_fraction=0.2,
+                                        min_gap_sec=1.0,
+                                        min_cut_time_sec=0.0,
+                                        expansion_time_sec=0.0,
+                                        correction_window_time=0.3,
+                                        target_files=None):
+        """
+        Detects trigger/steady/correction intervals directly on RAW signal and stores
+        the resulting indices and times in each file entry.
+        """
+        if not (0.0 <= margin_fraction < 0.5):
+            raise ValueError("margin_fraction must be in [0.0, 0.5).")
+
+        filenames = self._normalize_target_files(target_files)
+        if not filenames:
+            raise ValueError("No valid target files provided for raw interval detection.")
+
+        for filename in filenames:
+            file_data = self.data[filename]
+            interval_data = self._detect_cutting_interval(
+                signal=file_data['raw'],
+                t_full=file_data['t_full'],
+                trigger_threshold=trigger_threshold,
+                margin_fraction=margin_fraction,
+                filename=filename,
+                min_gap_sec=min_gap_sec,
+                min_cut_time_sec=min_cut_time_sec,
+                expansion_time_sec=expansion_time_sec,
+                correction_window_time=correction_window_time,
+            )
+            file_data.update(interval_data)
             
     def compute_average_cutting_force(self,
                                       trigger_threshold=20.0,
                                       margin_fraction=0.2,
                                       use_filtered=True,
-                                      target_files=None):
+                                      target_files=None,
+                                      min_gap_sec=1.0,
+                                      min_cut_time_sec=0.0,
+                                      expansion_time_sec=0.0,
+                                      correction_window_time=0.3,
+                                      prefer_existing_interval=True):
         """
         Detects the cutting interval via a simple amplitude threshold ('trigger')
         and computes the average cutting force in the central (steady-state)
@@ -457,13 +580,26 @@ class AutomaticSignalProcessor:
                     "Run 'drift_offset_correction' (and optionally 'apply_lowpass_filter') first."
                 )
 
-            interval_data = self._detect_cutting_interval(
-                signal=signal, 
-                t_full=file_data['t_full'], 
-                trigger_threshold=trigger_threshold, 
-                margin_fraction=margin_fraction, 
-                filename=filename
-            )
+            has_existing = ('steady_start_idx' in file_data and 'steady_end_idx' in file_data)
+            if has_existing and prefer_existing_interval:
+                interval_data = {
+                    'steady_start_idx': file_data['steady_start_idx'],
+                    'steady_end_idx': file_data['steady_end_idx'],
+                    'steady_start_time': file_data.get('steady_start_time'),
+                    'steady_end_time': file_data.get('steady_end_time'),
+                }
+            else:
+                interval_data = self._detect_cutting_interval(
+                    signal=signal,
+                    t_full=file_data['t_full'],
+                    trigger_threshold=trigger_threshold,
+                    margin_fraction=margin_fraction,
+                    filename=filename,
+                    min_gap_sec=min_gap_sec,
+                    min_cut_time_sec=min_cut_time_sec,
+                    expansion_time_sec=expansion_time_sec,
+                    correction_window_time=correction_window_time,
+                )
 
             steady_segment = signal[interval_data['steady_start_idx']:interval_data['steady_end_idx']]
             mean_force = float(np.mean(steady_segment))
