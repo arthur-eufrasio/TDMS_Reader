@@ -36,15 +36,15 @@ class TDMSGuiApp:
         self.span_selector = None
 
         self.default_params = {
-            'window_time': 0.3,
-            'noise_tolerance': 20.0,
-            'cutoff_freq': 10.0,
+            'window_time': 0.1,
+            'noise_tolerance': 10.0,
+            'cutoff_freq': 50.0,
             'filter_order': 5,
             'trigger_threshold': 5.0,
             'margin_fraction': 0.1,
             'min_gap_sec': 1.0,
             'min_cut_time_sec': 0.4,
-            'expansion_time_sec': 0.2,
+            'expansion_time_sec': 0.3,
         }
 
         self._build_ui()
