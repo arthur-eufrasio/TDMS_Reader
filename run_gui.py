@@ -140,12 +140,30 @@ class TDMSGuiApp:
         self.show_raw_var = tk.BooleanVar(value=True)
         self.show_corrected_var = tk.BooleanVar(value=True)
         self.show_filtered_var = tk.BooleanVar(value=True)
+        self.show_trigger_region_var = tk.BooleanVar(value=True)
+        self.show_steady_region_var = tk.BooleanVar(value=True)
+        self.show_corr_windows_var = tk.BooleanVar(value=True)
+        self.show_manual_region_var = tk.BooleanVar(value=True)
+        self.show_auto_mean_var = tk.BooleanVar(value=True)
+        self.show_manual_mean_var = tk.BooleanVar(value=True)
 
         display_opts = ttk.Frame(merged_group)
         display_opts.grid(row=10, column=0, sticky="w")
         ttk.Checkbutton(display_opts, text="raw", variable=self.show_raw_var, command=self.refresh_plot).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Checkbutton(display_opts, text="corrected", variable=self.show_corrected_var, command=self.refresh_plot).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Checkbutton(display_opts, text="filtered", variable=self.show_filtered_var, command=self.refresh_plot).pack(side=tk.LEFT, padx=(0, 8))
+
+        display_overlays = ttk.Frame(merged_group)
+        display_overlays.grid(row=11, column=0, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(display_overlays, text="trigger region", variable=self.show_trigger_region_var, command=self.refresh_plot).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(display_overlays, text="steady region", variable=self.show_steady_region_var, command=self.refresh_plot).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(display_overlays, text="correction windows", variable=self.show_corr_windows_var, command=self.refresh_plot).pack(side=tk.LEFT, padx=(0, 8))
+
+        display_means = ttk.Frame(merged_group)
+        display_means.grid(row=12, column=0, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(display_means, text="manual region", variable=self.show_manual_region_var, command=self.refresh_plot).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(display_means, text="auto mean", variable=self.show_auto_mean_var, command=self.refresh_plot).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(display_means, text="manual mean", variable=self.show_manual_mean_var, command=self.refresh_plot).pack(side=tk.LEFT, padx=(0, 8))
 
         # Adjustable parameters used for viewed files
         self.window_time_var = tk.StringVar(value=str(self.default_params['window_time']))
@@ -159,7 +177,7 @@ class TDMSGuiApp:
         self.expand_var = tk.StringVar(value=str(self.default_params['expansion_time_sec']))
 
         params_frame = ttk.Frame(merged_group)
-        params_frame.grid(row=11, column=0, sticky="ew", pady=(8, 0))
+        params_frame.grid(row=13, column=0, sticky="ew", pady=(8, 0))
 
         ttk.Label(params_frame, text="Window(s)").grid(row=0, column=0, sticky="w")
         ttk.Entry(params_frame, textvariable=self.window_time_var, width=8).grid(row=0, column=1, sticky="w")
@@ -185,7 +203,7 @@ class TDMSGuiApp:
         ttk.Entry(params_frame, textvariable=self.expand_var, width=8).grid(row=4, column=1, sticky="w", pady=(4, 0))
 
         ttk.Button(merged_group, text="Apply Parameters To Viewed Files", command=self._apply_params_to_viewed_files).grid(
-            row=12, column=0, sticky="ew", pady=(8, 0)
+            row=14, column=0, sticky="ew", pady=(8, 0)
         )
 
         # 3) Region selection
@@ -204,7 +222,17 @@ class TDMSGuiApp:
         ttk.Entry(select_group, textvariable=self.sel_end_var, width=10).grid(row=2, column=1, sticky="w")
 
         ttk.Button(select_group, text="Use Entry Range", command=self._apply_entry_range).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 6))
-        ttk.Button(select_group, text="Manual Mean Force (Active File)", command=self._manual_compute_force).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        tk.Button(
+            select_group,
+            text="Manual Mean Force (Active File)",
+            command=self._manual_compute_force,
+            bg="#1f6aa5",
+            fg="white",
+            activebackground="#2b7bbb",
+            activeforeground="white",
+            relief=tk.RAISED,
+            font=("Segoe UI", 9, "bold"),
+        ).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0), ipady=2)
         ttk.Button(select_group, text="Zero Selected Region", command=self._zero_selected_region).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         ttk.Button(select_group, text="Remove Selected Region", command=self._remove_selected_region).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         ttk.Button(select_group, text="Keep Only Selected Region", command=self._keep_only_selected_region).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(4, 0))
@@ -631,7 +659,8 @@ class TDMSGuiApp:
         self.sel_end_var.set(f"{self.selection_end:.6f}")
 
         self._save_ui_to_states([self.current_file], include_manual=True)
-        self._manual_compute_force()
+        self._log(f"Selected region for active file [{self.selection_start:.4f}, {self.selection_end:.4f}] s")
+        self.refresh_plot()
 
     def _apply_entry_range(self):
         try:
@@ -644,7 +673,8 @@ class TDMSGuiApp:
             self.selection_end = end
             if self.current_file:
                 self._save_ui_to_states([self.current_file], include_manual=True)
-            self._manual_compute_force()
+            self._log(f"Set region for active file [{self.selection_start:.4f}, {self.selection_end:.4f}] s")
+            self.refresh_plot()
         except Exception as exc:
             messagebox.showerror("Invalid range", str(exc))
 
@@ -847,17 +877,19 @@ class TDMSGuiApp:
                 ax.plot(t, fdata['raw'], color='tab:gray', linewidth=0.9, label='raw')
 
             # Detection regions
-            if state['tri_start_time'] is not None and state['tri_end_time'] is not None:
+            if self.show_trigger_region_var.get() and state['tri_start_time'] is not None and state['tri_end_time'] is not None:
                 ax.axvspan(state['tri_start_time'], state['tri_end_time'], color='gray', alpha=0.12, label='trigger')
-            if state['steady_start_time'] is not None and state['steady_end_time'] is not None:
+            if self.show_steady_region_var.get() and state['steady_start_time'] is not None and state['steady_end_time'] is not None:
                 ax.axvspan(state['steady_start_time'], state['steady_end_time'], color='tab:green', alpha=0.18, label='steady')
-            if state['corr_left_start_time'] is not None and state['corr_left_end_time'] is not None:
+            if self.show_corr_windows_var.get() and state['corr_left_start_time'] is not None and state['corr_left_end_time'] is not None:
                 ax.axvspan(state['corr_left_start_time'], state['corr_left_end_time'], color='gold', alpha=0.18, label='corr start')
-            if state['corr_right_start_time'] is not None and state['corr_right_end_time'] is not None:
+            if self.show_corr_windows_var.get() and state['corr_right_start_time'] is not None and state['corr_right_end_time'] is not None:
                 ax.axvspan(state['corr_right_start_time'], state['corr_right_end_time'], color='gold', alpha=0.18, label='corr end')
 
-            if state['mean_force_manual'] is not None and state['manual_start_time'] is not None and state['manual_end_time'] is not None:
+            if self.show_manual_region_var.get() and state['manual_start_time'] is not None and state['manual_end_time'] is not None:
                 ax.axvspan(state['manual_start_time'], state['manual_end_time'], color='tab:purple', alpha=0.16, label='manual')
+
+            if self.show_manual_mean_var.get() and state['mean_force_manual'] is not None and state['manual_start_time'] is not None and state['manual_end_time'] is not None:
                 ax.plot(
                     [state['manual_start_time'], state['manual_end_time']],
                     [state['mean_force_manual'], state['mean_force_manual']],
@@ -866,7 +898,8 @@ class TDMSGuiApp:
                     linewidth=1.8,
                     label=f"manual mean: {state['mean_force_manual']:.2f}",
                 )
-            elif state['mean_force_auto'] is not None and state['steady_start_time'] is not None and state['steady_end_time'] is not None:
+
+            if self.show_auto_mean_var.get() and state['mean_force_auto'] is not None and state['steady_start_time'] is not None and state['steady_end_time'] is not None:
                 ax.plot(
                     [state['steady_start_time'], state['steady_end_time']],
                     [state['mean_force_auto'], state['mean_force_auto']],
