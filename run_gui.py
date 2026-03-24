@@ -42,8 +42,8 @@ class TDMSGuiApp:
             'filter_order': 5,
             'trigger_threshold': 5.0,
             'margin_fraction': 0.1,
-            'min_gap_sec': 1.0,
-            'min_cut_time_sec': 0.4,
+            'min_gap_sec': 0.5,
+            'min_cut_time_sec': 1.0,
             'expansion_time_sec': 0.3,
         }
 
