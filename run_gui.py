@@ -765,7 +765,7 @@ class TDMSGuiApp:
         state['filtered'] = fdata.get('filtered').copy() if 'filtered' in fdata else None
 
     # ----------------------------- EXPORT -----------------------------
-    def _export_force_csv(self):
+    def _export_force_csv(self):        
         if not self.source_path:
             messagebox.showwarning("Missing source", "Load source data first.")
             return
@@ -777,13 +777,23 @@ class TDMSGuiApp:
 
         channels = self.channels_by_group.get(group_name, [])
         canonical = {'fx': None, 'fy': None, 'fz': None}
+        
+        # Look for 'fx', 'fy', 'fz' anywhere in the channel name (case-insensitive)
         for ch in channels:
             lc = ch.strip().lower()
-            if lc in canonical and canonical[lc] is None:
-                canonical[lc] = ch
+            if 'fx' in lc and canonical['fx'] is None:
+                canonical['fx'] = ch
+            elif 'fy' in lc and canonical['fy'] is None:
+                canonical['fy'] = ch
+            elif 'fz' in lc and canonical['fz'] is None:
+                canonical['fz'] = ch
 
-        if not all(canonical.values()):
-            messagebox.showerror("Missing channels", "Could not map Fx/Fy/Fz channels in selected group.")
+        # Filter out the axes that were not found, keeping only the existing ones
+        found_axes = {axis: ch for axis, ch in canonical.items() if ch is not None}
+
+        # If absolutely nothing was found, alert the user and abort
+        if not found_axes:
+            messagebox.showerror("Missing channels", "Could not find any Fx, Fy, or Fz channels in the selected group.")
             return
 
         save_path = filedialog.asksaveasfilename(
@@ -795,25 +805,36 @@ class TDMSGuiApp:
             return
 
         files = sorted([os.path.basename(p) for p in self._resolve_tdms_paths(self.source_path)])
-        rows = {f: {'fx': '', 'fy': '', 'fz': ''} for f in files}
+        
+        # Prepare dynamic rows based only on the found axes
+        rows = {f: {axis: '' for axis in found_axes} for f in files}
 
         try:
-            for axis in ('fx', 'fy', 'fz'):
-                channel_name = canonical[axis]
+            for axis, channel_name in found_axes.items():
                 for fname in files:
                     key = self._state_key(group_name, channel_name, fname)
                     state = self.state_map.get(key)
                     if state is None:
                         continue
 
-                    val = state['mean_force_manual'] if state['mean_force_manual'] is not None else state['mean_force_auto']
+                    # Prefer manual force over auto force, if available
+                    val = state.get('mean_force_manual')
+                    if val is None:
+                        val = state.get('mean_force_auto')
+                        
                     rows[fname][axis] = '' if val is None else f"{val:.4f}"
 
             with open(save_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(['file', 'fx', 'fy', 'fz'])
+                
+                # Create a dynamic header (e.g., ['file', 'fx', 'fy'] if 'fz' is missing)
+                header = ['file'] + list(found_axes.keys())
+                writer.writerow(header)
+                
                 for fname in files:
-                    writer.writerow([fname, rows[fname]['fx'], rows[fname]['fy'], rows[fname]['fz']])
+                    # Build the row dynamically based on the found axes
+                    row_data = [fname] + [rows[fname][axis] for axis in found_axes.keys()]
+                    writer.writerow(row_data)
 
             self._log(f"CSV exported: {save_path}")
         except Exception as exc:
