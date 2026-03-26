@@ -32,6 +32,10 @@ class MainWindow:
         self._on_export_requested: Optional[Callable[[], None]] = None
         self._on_span_selected: Optional[Callable[[float, float], None]] = None
         self._on_apply_range_requested: Optional[Callable[[], None]] = None
+        self._on_zero_span_requested: Optional[Callable[[], None]] = None
+        self._on_remove_span_requested: Optional[Callable[[], None]] = None
+        self._on_keep_span_requested: Optional[Callable[[], None]] = None
+        self._on_plot_options_changed: Optional[Callable[[], None]] = None
 
         self.path_var = tk.StringVar(value="")
         self.group_var = tk.StringVar(value="")
@@ -49,6 +53,16 @@ class MainWindow:
 
         self.sel_start_var = tk.StringVar(value="")
         self.sel_end_var = tk.StringVar(value="")
+
+        self.show_raw_var = tk.BooleanVar(value=True)
+        self.show_corrected_var = tk.BooleanVar(value=True)
+        self.show_filtered_var = tk.BooleanVar(value=True)
+        self.show_trigger_region_var = tk.BooleanVar(value=True)
+        self.show_steady_region_var = tk.BooleanVar(value=True)
+        self.show_corr_windows_var = tk.BooleanVar(value=True)
+        self.show_manual_region_var = tk.BooleanVar(value=True)
+        self.show_auto_mean_var = tk.BooleanVar(value=True)
+        self.show_manual_mean_var = tk.BooleanVar(value=True)
 
         self.span_selector: Optional[SpanSelector] = None
 
@@ -87,6 +101,18 @@ class MainWindow:
 
     def bind_apply_range_requested(self, callback: Callable[[], None]) -> None:
         self._on_apply_range_requested = callback
+
+    def bind_zero_span_requested(self, callback: Callable[[], None]) -> None:
+        self._on_zero_span_requested = callback
+
+    def bind_remove_span_requested(self, callback: Callable[[], None]) -> None:
+        self._on_remove_span_requested = callback
+
+    def bind_keep_span_requested(self, callback: Callable[[], None]) -> None:
+        self._on_keep_span_requested = callback
+
+    def bind_plot_options_changed(self, callback: Callable[[], None]) -> None:
+        self._on_plot_options_changed = callback
 
     # -------- Public UI helpers --------
     def set_path(self, path: str) -> None:
@@ -159,6 +185,19 @@ class MainWindow:
             "expansion_time_sec": float(self.expand_var.get()),
         }
 
+    def get_plot_options(self) -> Dict[str, bool]:
+        return {
+            "show_raw": bool(self.show_raw_var.get()),
+            "show_corrected": bool(self.show_corrected_var.get()),
+            "show_filtered": bool(self.show_filtered_var.get()),
+            "show_trigger_region": bool(self.show_trigger_region_var.get()),
+            "show_steady_region": bool(self.show_steady_region_var.get()),
+            "show_corr_windows": bool(self.show_corr_windows_var.get()),
+            "show_manual_region": bool(self.show_manual_region_var.get()),
+            "show_auto_mean": bool(self.show_auto_mean_var.get()),
+            "show_manual_mean": bool(self.show_manual_mean_var.get()),
+        }
+
     def prompt_save_csv(self) -> str:
         return filedialog.asksaveasfilename(
             defaultextension=".csv",
@@ -179,6 +218,7 @@ class MainWindow:
         title_prefix: str,
     ) -> None:
         self.figure.clear()
+        plot_options = self.get_plot_options()
 
         if not records or not selected_files:
             ax = self.figure.add_subplot(111)
@@ -203,26 +243,32 @@ class MainWindow:
                 ax.set_visible(False)
                 continue
 
-            ax.plot(record.t_full, record.raw, color="tab:gray", linewidth=0.9, label="raw")
-            if record.corrected is not None:
+            if plot_options["show_raw"]:
+                ax.plot(record.t_full, record.raw, color="tab:gray", linewidth=0.9, label="raw")
+            if plot_options["show_corrected"] and record.corrected is not None:
                 ax.plot(record.t_full, record.corrected, color="tab:orange", linewidth=0.9, label="corrected")
-            if record.filtered is not None:
+            if plot_options["show_filtered"] and record.filtered is not None:
                 ax.plot(record.t_full, record.filtered, color="tab:blue", linewidth=0.9, label="filtered")
 
-            if record.tri_start_time is not None and record.tri_end_time is not None:
+            if plot_options["show_trigger_region"] and record.tri_start_time is not None and record.tri_end_time is not None:
                 ax.axvspan(record.tri_start_time, record.tri_end_time, color="gray", alpha=0.12, label="trigger")
-            if record.steady_start_time is not None and record.steady_end_time is not None:
+            if plot_options["show_steady_region"] and record.steady_start_time is not None and record.steady_end_time is not None:
                 ax.axvspan(record.steady_start_time, record.steady_end_time, color="tab:green", alpha=0.16, label="steady")
-            if record.corr_left_start_time is not None and record.corr_left_end_time is not None:
+            if plot_options["show_corr_windows"] and record.corr_left_start_time is not None and record.corr_left_end_time is not None:
                 ax.axvspan(record.corr_left_start_time, record.corr_left_end_time, color="gold", alpha=0.12, label="corr start")
-            if record.corr_right_start_time is not None and record.corr_right_end_time is not None:
+            if plot_options["show_corr_windows"] and record.corr_right_start_time is not None and record.corr_right_end_time is not None:
                 ax.axvspan(record.corr_right_start_time, record.corr_right_end_time, color="gold", alpha=0.12, label="corr end")
 
             span = selected_spans.get(file_name)
-            if span is not None:
+            if plot_options["show_manual_region"] and span is not None:
                 ax.axvspan(span[0], span[1], color="tab:purple", alpha=0.12, label="manual")
 
-            if record.mean_force_auto is not None and record.steady_start_time is not None and record.steady_end_time is not None:
+            if (
+                plot_options["show_auto_mean"]
+                and record.mean_force_auto is not None
+                and record.steady_start_time is not None
+                and record.steady_end_time is not None
+            ):
                 ax.plot(
                     [record.steady_start_time, record.steady_end_time],
                     [record.mean_force_auto, record.mean_force_auto],
@@ -232,7 +278,7 @@ class MainWindow:
                     label=f"auto mean: {record.mean_force_auto:.2f}",
                 )
 
-            if record.mean_force_manual is not None and span is not None:
+            if plot_options["show_manual_mean"] and record.mean_force_manual is not None and span is not None:
                 ax.plot(
                     [span[0], span[1]],
                     [record.mean_force_manual, record.mean_force_manual],
@@ -265,12 +311,37 @@ class MainWindow:
         main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main_pane.pack(fill=tk.BOTH, expand=True)
 
-        left = ttk.Frame(main_pane, padding=10)
+        left = ttk.Frame(main_pane)
         right = ttk.Frame(main_pane, padding=10)
         main_pane.add(left, weight=1)
         main_pane.add(right, weight=3)
 
-        load_group = ttk.LabelFrame(left, text="1) Source", padding=8)
+        # Scrollable controls column to keep all actions accessible on smaller windows.
+        controls_canvas = tk.Canvas(left, highlightthickness=0)
+        controls_scrollbar = ttk.Scrollbar(left, orient=tk.VERTICAL, command=controls_canvas.yview)
+        controls_canvas.configure(yscrollcommand=controls_scrollbar.set)
+
+        controls_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        controls_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        controls_root = ttk.Frame(controls_canvas, padding=10)
+        controls_window = controls_canvas.create_window((0, 0), window=controls_root, anchor="nw")
+
+        def _sync_scroll_region(_event=None) -> None:
+            controls_canvas.configure(scrollregion=controls_canvas.bbox("all"))
+
+        def _sync_inner_width(event) -> None:
+            controls_canvas.itemconfigure(controls_window, width=event.width)
+
+        controls_root.bind("<Configure>", _sync_scroll_region)
+        controls_canvas.bind("<Configure>", _sync_inner_width)
+
+        def _on_mousewheel(event) -> None:
+            controls_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        controls_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        load_group = ttk.LabelFrame(controls_root, text="1) Source", padding=8)
         load_group.pack(fill=tk.X, pady=4)
 
         ttk.Entry(load_group, textvariable=self.path_var, state="readonly", width=42).grid(row=0, column=0, columnspan=3, sticky="ew")
@@ -281,7 +352,7 @@ class MainWindow:
         load_group.columnconfigure(1, weight=1)
         load_group.columnconfigure(2, weight=1)
 
-        channel_group = ttk.LabelFrame(left, text="2) Stream Selection", padding=8)
+        channel_group = ttk.LabelFrame(controls_root, text="2) Stream Selection", padding=8)
         channel_group.pack(fill=tk.X, pady=4)
 
         ttk.Label(channel_group, text="Group").grid(row=0, column=0, sticky="w")
@@ -300,14 +371,34 @@ class MainWindow:
         self.active_file_combo.bind("<<ComboboxSelected>>", lambda _e: self._emit_active_file_changed())
         channel_group.columnconfigure(0, weight=1)
 
-        files_group = ttk.LabelFrame(left, text="3) Files", padding=8)
+        files_group = ttk.LabelFrame(controls_root, text="3) Files", padding=8)
         files_group.pack(fill=tk.BOTH, expand=True, pady=4)
         self.view_files_listbox = tk.Listbox(files_group, selectmode=tk.EXTENDED, exportselection=False, height=9)
         self.view_files_listbox.pack(fill=tk.BOTH, expand=True)
         self.view_files_listbox.bind("<<ListboxSelect>>", lambda _e: self._emit_files_changed())
         ttk.Button(files_group, text="Select All", command=self.select_all_files).pack(fill=tk.X, pady=(6, 0))
 
-        params_group = ttk.LabelFrame(left, text="4) Parameters", padding=8)
+        display_group = ttk.LabelFrame(controls_root, text="4) Display Options", padding=8)
+        display_group.pack(fill=tk.X, pady=4)
+        display_signals = ttk.Frame(display_group)
+        display_signals.pack(fill=tk.X)
+        ttk.Checkbutton(display_signals, text="raw", variable=self.show_raw_var, command=self._emit_plot_options_changed).pack(side=tk.LEFT)
+        ttk.Checkbutton(display_signals, text="corrected", variable=self.show_corrected_var, command=self._emit_plot_options_changed).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Checkbutton(display_signals, text="filtered", variable=self.show_filtered_var, command=self._emit_plot_options_changed).pack(side=tk.LEFT, padx=(8, 0))
+
+        display_regions = ttk.Frame(display_group)
+        display_regions.pack(fill=tk.X, pady=(4, 0))
+        ttk.Checkbutton(display_regions, text="trigger", variable=self.show_trigger_region_var, command=self._emit_plot_options_changed).pack(side=tk.LEFT)
+        ttk.Checkbutton(display_regions, text="steady", variable=self.show_steady_region_var, command=self._emit_plot_options_changed).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Checkbutton(display_regions, text="corr windows", variable=self.show_corr_windows_var, command=self._emit_plot_options_changed).pack(side=tk.LEFT, padx=(8, 0))
+
+        display_metrics = ttk.Frame(display_group)
+        display_metrics.pack(fill=tk.X, pady=(4, 0))
+        ttk.Checkbutton(display_metrics, text="manual region", variable=self.show_manual_region_var, command=self._emit_plot_options_changed).pack(side=tk.LEFT)
+        ttk.Checkbutton(display_metrics, text="auto mean", variable=self.show_auto_mean_var, command=self._emit_plot_options_changed).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Checkbutton(display_metrics, text="manual mean", variable=self.show_manual_mean_var, command=self._emit_plot_options_changed).pack(side=tk.LEFT, padx=(8, 0))
+
+        params_group = ttk.LabelFrame(controls_root, text="5) Parameters", padding=8)
         params_group.pack(fill=tk.X, pady=4)
         self._add_param_row(params_group, 0, "Window(s)", self.window_time_var)
         self._add_param_row(params_group, 1, "Noise tol", self.noise_tol_var)
@@ -319,18 +410,21 @@ class MainWindow:
         self._add_param_row(params_group, 7, "Expand(s)", self.expand_var)
         ttk.Button(params_group, text="Process Selected Files", command=self._request_process).grid(row=8, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
-        manual_group = ttk.LabelFrame(left, text="5) Manual Span", padding=8)
+        manual_group = ttk.LabelFrame(controls_root, text="6) Manual Span", padding=8)
         manual_group.pack(fill=tk.X, pady=4)
         self._add_param_row(manual_group, 0, "Start (s)", self.sel_start_var)
         self._add_param_row(manual_group, 1, "End (s)", self.sel_end_var)
         ttk.Button(manual_group, text="Use Entry Range", command=self._request_apply_range).grid(row=2, column=0, columnspan=2, sticky="ew")
         ttk.Button(manual_group, text="Manual Mean (Active File)", command=self._request_manual_force).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Button(manual_group, text="Zero Selected Region", command=self._request_zero_span).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Button(manual_group, text="Remove Selected Region", command=self._request_remove_span).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Button(manual_group, text="Keep Only Selected Region", command=self._request_keep_span).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
-        export_group = ttk.LabelFrame(left, text="6) Export", padding=8)
+        export_group = ttk.LabelFrame(controls_root, text="7) Export", padding=8)
         export_group.pack(fill=tk.X, pady=4)
         ttk.Button(export_group, text="Export Mean Forces CSV", command=self._request_export).pack(fill=tk.X)
 
-        log_group = ttk.LabelFrame(left, text="Log", padding=8)
+        log_group = ttk.LabelFrame(controls_root, text="Log", padding=8)
         log_group.pack(fill=tk.BOTH, expand=True, pady=4)
         self.log_text = ScrolledText(log_group, height=10)
         self.log_text.pack(fill=tk.BOTH, expand=True)
@@ -430,3 +524,19 @@ class MainWindow:
     def _request_apply_range(self) -> None:
         if self._on_apply_range_requested:
             self._on_apply_range_requested()
+
+    def _request_zero_span(self) -> None:
+        if self._on_zero_span_requested:
+            self._on_zero_span_requested()
+
+    def _request_remove_span(self) -> None:
+        if self._on_remove_span_requested:
+            self._on_remove_span_requested()
+
+    def _request_keep_span(self) -> None:
+        if self._on_keep_span_requested:
+            self._on_keep_span_requested()
+
+    def _emit_plot_options_changed(self) -> None:
+        if self._on_plot_options_changed:
+            self._on_plot_options_changed()

@@ -35,6 +35,10 @@ class MainController:
         self.view.bind_export_requested(self.on_export_requested)
         self.view.bind_span_selected(self.on_span_selected)
         self.view.bind_apply_range_requested(self.on_apply_range_requested)
+        self.view.bind_zero_span_requested(self.on_zero_span_requested)
+        self.view.bind_remove_span_requested(self.on_remove_span_requested)
+        self.view.bind_keep_span_requested(self.on_keep_span_requested)
+        self.view.bind_plot_options_changed(self.on_plot_options_changed)
 
     # -------- Event handlers --------
     def on_path_selected(self, path: str) -> None:
@@ -162,6 +166,67 @@ class MainController:
             self._refresh_plot()
         except Exception as exc:
             messagebox.showerror("Manual force error", str(exc))
+
+    def on_zero_span_requested(self) -> None:
+        record = self.state.get_active_record()
+        if record is None:
+            messagebox.showwarning("No active file", "Select an active file first.")
+            return
+
+        span = self.state.selected_spans.get(record.filename)
+        if span is None:
+            messagebox.showwarning("No span", "Select a span first using drag or entry values.")
+            return
+
+        try:
+            self.filter_service.zero_out_time_span(record, span[0], span[1])
+            self.view.log(f"Zeroed filtered signal in [{span[0]:.4f}, {span[1]:.4f}] s for {record.filename}")
+            self._refresh_plot()
+        except Exception as exc:
+            messagebox.showerror("Zero region error", str(exc))
+
+    def on_remove_span_requested(self) -> None:
+        record = self.state.get_active_record()
+        if record is None:
+            messagebox.showwarning("No active file", "Select an active file first.")
+            return
+
+        span = self.state.selected_spans.get(record.filename)
+        if span is None:
+            messagebox.showwarning("No span", "Select a span first using drag or entry values.")
+            return
+
+        try:
+            self.filter_service.remove_time_span(record, span[0], span[1])
+            self.state.selected_spans.pop(record.filename, None)
+            self.view.set_manual_range(None, None)
+            self.view.log(f"Removed signal span [{span[0]:.4f}, {span[1]:.4f}] s for {record.filename}")
+            self._refresh_plot()
+        except Exception as exc:
+            messagebox.showerror("Remove region error", str(exc))
+
+    def on_keep_span_requested(self) -> None:
+        record = self.state.get_active_record()
+        if record is None:
+            messagebox.showwarning("No active file", "Select an active file first.")
+            return
+
+        span = self.state.selected_spans.get(record.filename)
+        if span is None:
+            messagebox.showwarning("No span", "Select a span first using drag or entry values.")
+            return
+
+        try:
+            self.filter_service.keep_only_time_span(record, span[0], span[1])
+            self.state.selected_spans.pop(record.filename, None)
+            self.view.set_manual_range(None, None)
+            self.view.log(f"Kept only signal span [{span[0]:.4f}, {span[1]:.4f}] s for {record.filename}")
+            self._refresh_plot()
+        except Exception as exc:
+            messagebox.showerror("Keep-only region error", str(exc))
+
+    def on_plot_options_changed(self) -> None:
+        self._refresh_plot()
 
     def on_export_requested(self) -> None:
         if not self.state.records:
