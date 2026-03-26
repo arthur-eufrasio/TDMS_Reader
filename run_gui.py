@@ -42,7 +42,6 @@ class TDMSGuiApp:
             'filter_order': 5,
             'trigger_threshold': 5.0,
             'margin_fraction': 0.1,
-            'min_gap_sec': 0.5,
             'min_cut_time_sec': 1.0,
             'expansion_time_sec': 0.3,
         }
@@ -172,7 +171,6 @@ class TDMSGuiApp:
         self.order_var = tk.StringVar(value=str(self.default_params['filter_order']))
         self.trigger_var = tk.StringVar(value=str(self.default_params['trigger_threshold']))
         self.margin_var = tk.StringVar(value=str(self.default_params['margin_fraction']))
-        self.min_gap_var = tk.StringVar(value=str(self.default_params['min_gap_sec']))
         self.min_cut_var = tk.StringVar(value=str(self.default_params['min_cut_time_sec']))
         self.expand_var = tk.StringVar(value=str(self.default_params['expansion_time_sec']))
 
@@ -194,8 +192,6 @@ class TDMSGuiApp:
         ttk.Label(params_frame, text="Margin").grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(4, 0))
         ttk.Entry(params_frame, textvariable=self.margin_var, width=8).grid(row=2, column=3, sticky="w", pady=(4, 0))
 
-        ttk.Label(params_frame, text="Min gap(s)").grid(row=3, column=0, sticky="w", pady=(4, 0))
-        ttk.Entry(params_frame, textvariable=self.min_gap_var, width=8).grid(row=3, column=1, sticky="w", pady=(4, 0))
         ttk.Label(params_frame, text="Min cut(s)").grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(4, 0))
         ttk.Entry(params_frame, textvariable=self.min_cut_var, width=8).grid(row=3, column=3, sticky="w", pady=(4, 0))
 
@@ -294,7 +290,6 @@ class TDMSGuiApp:
                 'filter_order': self.default_params['filter_order'],
                 'trigger_threshold': self.default_params['trigger_threshold'],
                 'margin_fraction': self.default_params['margin_fraction'],
-                'min_gap_sec': self.default_params['min_gap_sec'],
                 'min_cut_time_sec': self.default_params['min_cut_time_sec'],
                 'expansion_time_sec': self.default_params['expansion_time_sec'],
 
@@ -347,7 +342,6 @@ class TDMSGuiApp:
         self.order_var.set(str(int(state['filter_order'])))
         self.trigger_var.set(str(state['trigger_threshold']))
         self.margin_var.set(str(state['margin_fraction']))
-        self.min_gap_var.set(str(state['min_gap_sec']))
         self.min_cut_var.set(str(state['min_cut_time_sec']))
         self.expand_var.set(str(state['expansion_time_sec']))
 
@@ -366,7 +360,6 @@ class TDMSGuiApp:
         filter_order = int(self.order_var.get())
         trigger_threshold = float(self.trigger_var.get())
         margin_fraction = float(self.margin_var.get())
-        min_gap_sec = float(self.min_gap_var.get())
         min_cut_time_sec = float(self.min_cut_var.get())
         expansion_time_sec = float(self.expand_var.get())
 
@@ -382,7 +375,6 @@ class TDMSGuiApp:
             state['filter_order'] = filter_order
             state['trigger_threshold'] = trigger_threshold
             state['margin_fraction'] = margin_fraction
-            state['min_gap_sec'] = min_gap_sec
             state['min_cut_time_sec'] = min_cut_time_sec
             state['expansion_time_sec'] = expansion_time_sec
             if include_manual:
@@ -566,7 +558,6 @@ class TDMSGuiApp:
                 proc.detect_cutting_intervals_on_raw(
                     trigger_threshold=state['trigger_threshold'],
                     margin_fraction=state['margin_fraction'],
-                    min_gap_sec=state['min_gap_sec'],
                     min_cut_time_sec=state['min_cut_time_sec'],
                     expansion_time_sec=state['expansion_time_sec'],
                     correction_window_time=state['window_time'],

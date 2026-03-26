@@ -390,8 +390,7 @@ class AutomaticSignalProcessor:
                                  trigger_threshold,
                                  margin_fraction,
                                  filename,
-                                 min_gap_sec=1.0,
-                                 min_cut_time_sec=0.0,
+                                 min_cut_time_sec=0.1,
                                  expansion_time_sec=0.0,
                                  correction_window_time=0.3):
         """
@@ -404,8 +403,6 @@ class AutomaticSignalProcessor:
             trigger_threshold (float): Amplitude threshold in N to detect cutting.
             margin_fraction (float): Fraction of the cut to discard at the edges.
             filename (str): The name of the file being processed (for error reporting).
-            min_gap_sec (float): Minimum time in seconds below the threshold to be considered 
-                                 the end of a cut. Defaults to 1.0s.
             
         Returns:
             dict: A dictionary containing the start/end indices and times for the 
@@ -422,27 +419,27 @@ class AutomaticSignalProcessor:
             raise RuntimeError(f"[{filename}] Signal is too short for interval detection.")
 
         fs = 1.0 / (t_full[1] - t_full[0])
-        min_gap_samples = int(min_gap_sec * fs)
+        min_gap_samples = 1
         min_cut_samples = max(1, int(min_cut_time_sec * fs))
         expansion_samples = int(expansion_time_sec * fs)
         corr_window_samples = max(2, int(correction_window_time * fs))
         
         gaps = np.where(np.diff(active_idx) > min_gap_samples)[0]
 
-        cut_ranges = []
+        trigger_regions = []
         seg_start_pos = 0
         for gap_pos in gaps:
             seg_end_pos = gap_pos
             s_idx = int(active_idx[seg_start_pos])
             e_idx = int(active_idx[seg_end_pos])
-            cut_ranges.append((s_idx, e_idx))
+            trigger_regions.append((s_idx, e_idx))
             seg_start_pos = gap_pos + 1
 
-        cut_ranges.append((int(active_idx[seg_start_pos]), int(active_idx[-1])))
+        trigger_regions.append((int(active_idx[seg_start_pos]), int(active_idx[-1])))
 
         tri_start_idx = None
         tri_end_idx = None
-        for s_idx, e_idx in cut_ranges:
+        for s_idx, e_idx in trigger_regions:
             if (e_idx - s_idx + 1) >= min_cut_samples:
                 tri_start_idx = s_idx
                 tri_end_idx = e_idx
@@ -498,7 +495,6 @@ class AutomaticSignalProcessor:
             'corr_left_end_time': float(t_full[corr_left_end_idx - 1]),
             'corr_right_start_time': float(t_full[corr_right_start_idx]),
             'corr_right_end_time': float(t_full[corr_right_end_idx - 1]),
-            'min_gap_sec': float(min_gap_sec),
             'min_cut_time_sec': float(min_cut_time_sec),
             'expansion_time_sec': float(expansion_time_sec),
             'correction_window_time': float(correction_window_time),
@@ -507,7 +503,6 @@ class AutomaticSignalProcessor:
     def detect_cutting_intervals_on_raw(self,
                                         trigger_threshold=20.0,
                                         margin_fraction=0.2,
-                                        min_gap_sec=1.0,
                                         min_cut_time_sec=0.0,
                                         expansion_time_sec=0.0,
                                         correction_window_time=0.3,
@@ -531,7 +526,6 @@ class AutomaticSignalProcessor:
                 trigger_threshold=trigger_threshold,
                 margin_fraction=margin_fraction,
                 filename=filename,
-                min_gap_sec=min_gap_sec,
                 min_cut_time_sec=min_cut_time_sec,
                 expansion_time_sec=expansion_time_sec,
                 correction_window_time=correction_window_time,
@@ -543,7 +537,6 @@ class AutomaticSignalProcessor:
                                       margin_fraction=0.2,
                                       use_filtered=True,
                                       target_files=None,
-                                      min_gap_sec=1.0,
                                       min_cut_time_sec=0.0,
                                       expansion_time_sec=0.0,
                                       correction_window_time=0.3,
@@ -595,7 +588,6 @@ class AutomaticSignalProcessor:
                     trigger_threshold=trigger_threshold,
                     margin_fraction=margin_fraction,
                     filename=filename,
-                    min_gap_sec=min_gap_sec,
                     min_cut_time_sec=min_cut_time_sec,
                     expansion_time_sec=expansion_time_sec,
                     correction_window_time=correction_window_time,
