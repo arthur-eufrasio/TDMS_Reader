@@ -209,7 +209,7 @@ class AutomaticSignalProcessor:
 
             corrected = raw_data - trend
 
-            offset = (np.mean(corrected[left_start:left_end]) + np.mean(corrected[right_start:right_end])) / 2
+            offset = np.mean(corrected[left_start:left_end]) / 2
             corrected -= offset
 
             self.data[filename]['corrected'] = corrected
